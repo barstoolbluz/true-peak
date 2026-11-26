@@ -225,3 +225,18 @@ processor with the actual two-minute 192 kHz stereo carrier.
 by this source revision. The inherited `fast066_numerical_probe_report.json`
 predates the native-input redesign and is retained only as baseline historical
 evidence; it is not a release qualification artifact for this implementation.
+
+## Licence
+
+true-peak is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 2 of the License, or (at your option)
+any later version. The full text is in [COPYING](COPYING).
+
+It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.
+
+One test fixture is third-party material under its own licence: the audio
+excerpt in `tests/fixtures`, taken from the Gradio project under the Apache
+License 2.0. Its provenance and licence text are kept beside it.
