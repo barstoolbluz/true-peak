@@ -3,7 +3,7 @@
 //! peak). Uses the same block size (16_384 frames) and PCM conversion as
 //! observe_cue_mirror. Does not invoke TonePoet or modify any audio artifact.
 //!
-//! cargo run -p tonepoet-true-peak --release --example rg_native_bench -- \
+//! cargo run -p true-peak --release --example rg_native_bench -- \
 //!     INPUT.raw 44100 2 s32le both 3
 //! modes: both, loudness, peak, decode. Run both first for the real workload.
 
@@ -13,10 +13,10 @@ use std::hint::black_box;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
-use tonepoet_true_peak::loudness::{
+use true_peak::loudness::{
     ChannelRole, LoudnessMeter, LoudnessMetricDemand, LoudnessProfile,
 };
-use tonepoet_true_peak::ReportingPeakMeter;
+use true_peak::ReportingPeakMeter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();

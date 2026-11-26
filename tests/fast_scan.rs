@@ -1,9 +1,9 @@
-use tonepoet_true_peak::{
+use true_peak::{
     CertifiedPeakMeter, CertifiedReconstruction, EdgePolicy, PeakLevel, PeakTier, SearchStatus,
     TruePeakError, FAST_ALGORITHM_REVISION, FAST_WALL_NANOS_PER_PROGRAMME_MINUTE,
 };
 
-fn run_fast(samples: &[f64], sample_rate_hz: u32, channels: usize, edge: EdgePolicy) -> tonepoet_true_peak::PeakCertificate {
+fn run_fast(samples: &[f64], sample_rate_hz: u32, channels: usize, edge: EdgePolicy) -> true_peak::PeakCertificate {
     let mut meter = CertifiedPeakMeter::new(sample_rate_hz, channels, edge, PeakTier::Fast).unwrap();
     meter.push_interleaved(samples).unwrap();
     meter.finalize().unwrap()
@@ -13,7 +13,7 @@ fn run_fast(samples: &[f64], sample_rate_hz: u32, channels: usize, edge: EdgePol
 /// and non-deterministic; it is not part of the logical certificate. Transactional
 /// equality assertions must exclude it. No-op unless the feature is built.
 #[allow(unused_mut)]
-fn strip_timing(mut certificate: tonepoet_true_peak::PeakCertificate) -> tonepoet_true_peak::PeakCertificate {
+fn strip_timing(mut certificate: true_peak::PeakCertificate) -> true_peak::PeakCertificate {
     #[cfg(feature = "fast-stage-timing")]
     {
         let d = &mut certificate.diagnostics;
@@ -57,7 +57,7 @@ fn deterministic_noise(frames: usize, channels: usize) -> Vec<f64> {
     out
 }
 
-fn assert_fast_accuracy(certificate: &tonepoet_true_peak::PeakCertificate) {
+fn assert_fast_accuracy(certificate: &true_peak::PeakCertificate) {
     for (channel, interval) in certificate.channel_intervals.iter().copied().enumerate() {
         let width = interval.width_db().unwrap_or(0.0);
         assert!(width <= 0.01 + 1.0e-12, "channel {channel} width {width:.12} dB");

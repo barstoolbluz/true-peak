@@ -3,12 +3,12 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
 
-use tonepoet_true_peak::{
+use true_peak::{
     CertifiedPeakMeter, EdgePolicy, PeakCertificate, PeakLevel, PeakTier,
     FAST_ALGORITHM_REVISION, FAST_WALL_NANOS_PER_PROGRAMME_MINUTE,
 };
 #[cfg(feature = "fast-stage-timing")]
-use tonepoet_true_peak::FastCommissioningMode;
+use true_peak::FastCommissioningMode;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().collect::<Vec<_>>();
