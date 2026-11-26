@@ -462,3 +462,140 @@ unsafe fn window_channel_sums_avx(
         accumulate_window_scalar(ring, channels, spans, pending[2], sums);
     }
 }
+
+// Same arithmetic graph as fidelity::State::process, including exact-zero
+// excitation and tiny homogeneous-tail clearing. No FMA or new ISA coverage.
+pub(super) fn filter_fidelity_frame(
+    backend: Backend,
+    frame: &[f64],
+    states: &mut [f64],
+    coefficients: super::fidelity::Coefficients,
+    output: &mut [f64],
+) {
+    // State-major layout: five planes, each exactly the channel count.
+    // These checks guard the packed raw-pointer loads and stores.
+    assert_eq!(states.len(), 5 * frame.len());
+    assert_eq!(frame.len(), output.len());
+    match backend.0 {
+        BackendKind::Scalar => fidelity_scalar(frame, states, coefficients, output, 0),
+        #[cfg(target_arch = "x86_64")]
+        BackendKind::Sse2 => unsafe { fidelity_sse2(frame, states, coefficients, output, 0) },
+        #[cfg(target_arch = "x86_64")]
+        BackendKind::Avx => unsafe { fidelity_avx(frame, states, coefficients, output, 0) },
+    }
+}
+
+fn fidelity_scalar(
+    frame: &[f64],
+    states: &mut [f64],
+    c: super::fidelity::Coefficients,
+    output: &mut [f64],
+    start: usize,
+) {
+    let channels = frame.len();
+    for channel in start..channels {
+        let mut state = super::fidelity::State {
+            delay: std::array::from_fn(|i| states[i * channels + channel]),
+        };
+        output[channel] = state.process(frame[channel], c);
+        for (i, value) in state.delay.into_iter().enumerate() {
+            states[i * channels + channel] = value;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn fidelity_avx_eq(a: __m256d, b: __m256d) -> __m256d {
+    _mm256_cmp_pd::<{ _CMP_EQ_OQ }>(a, b)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn fidelity_avx_lt(a: __m256d, b: __m256d) -> __m256d {
+    _mm256_cmp_pd::<{ _CMP_LT_OQ }>(a, b)
+}
+
+// The same recurrence for the two existing vector widths. State-major planes
+// allow direct loads/stores. A mask is needed only when a lane is unexcited.
+// Geometry and ISA are checked by filter_fidelity_frame and Backend.
+#[cfg(target_arch = "x86_64")]
+macro_rules! fidelity_kernel {
+    ($name:ident, $feature:literal, $lanes:literal,
+     $set:ident, $load:ident, $store:ident, $add:ident, $sub:ident, $mul:ident,
+     $and:ident, $andnot:ident, $eq:ident, $lt:ident, $movemask:ident, $tail:ident) => {
+        #[target_feature(enable = $feature)]
+        unsafe fn $name(
+            frame: &[f64],
+            states: &mut [f64],
+            c: super::fidelity::Coefficients,
+            output: &mut [f64],
+            mut channel: usize,
+        ) {
+            let zero = $set(0.0);
+            let sign = $set(-0.0);
+            let tiny = $set(super::fidelity::TINY);
+            let cc = $set(c.c);
+            let cs = $set(c.s);
+            let vh = $set(c.vh);
+            let ct = $set(c.t);
+            let rg = $set(c.rg);
+            let k2 = $set(c.k2);
+            let bm = $set(c.bp_mix);
+            let lm = $set(c.lp_mix);
+            let two = $set(2.0);
+            let channels = frame.len();
+            while channel + $lanes <= channels {
+                let state = states.as_mut_ptr().add(channel);
+                let x = $load(frame.as_ptr().add(channel));
+                let previous = $load(state);
+                let y = $load(state.add(channels));
+                let q = $load(state.add(2 * channels));
+                let a = $load(state.add(3 * channels));
+                let b = $load(state.add(4 * channels));
+                let dx = $sub(x, previous);
+                let mut yn = $add(y, $sub($sub(dx, $mul(cc, y)), $mul(cs, q)));
+                let mut qn = $add(q, $mul(cs, y));
+                let unexcited = $eq(dx, zero);
+                if $movemask(unexcited) != 0 {
+                    let clear = $and(unexcited, $and($lt($andnot(sign, yn), tiny), $lt($andnot(sign, qn), tiny)));
+                    yn = $andnot(clear, yn);
+                    qn = $andnot(clear, qn);
+                }
+                let t = $sub($sub(yn, b), $mul(rg, a));
+                let inc = $mul(ct, t);
+                let bp = $add(a, inc);
+                let mut out = $add($add($mul(vh, yn), $mul(bm, bp)), $mul(lm, b));
+                let mut an = $add(a, $mul(two, inc));
+                let mut bn = $add(b, $mul(k2, bp));
+                let unexcited = $eq(yn, zero);
+                if $movemask(unexcited) != 0 {
+                    let clear = $and(unexcited, $and($lt($andnot(sign, an), tiny), $lt($andnot(sign, bn), tiny)));
+                    an = $andnot(clear, an);
+                    bn = $andnot(clear, bn);
+                    out = $andnot(clear, out);
+                }
+                $store(state, x);
+                $store(state.add(channels), yn);
+                $store(state.add(2 * channels), qn);
+                $store(state.add(3 * channels), an);
+                $store(state.add(4 * channels), bn);
+                $store(output.as_mut_ptr().add(channel), out);
+                channel += $lanes;
+            }
+            if channel < channels {
+                $tail(frame, states, c, output, channel);
+            }
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+fidelity_kernel!(fidelity_sse2, "sse2", 2, _mm_set1_pd, _mm_loadu_pd, _mm_storeu_pd,
+    _mm_add_pd, _mm_sub_pd, _mm_mul_pd, _mm_and_pd, _mm_andnot_pd, _mm_cmpeq_pd, _mm_cmplt_pd, _mm_movemask_pd, fidelity_scalar);
+#[cfg(target_arch = "x86_64")]
+fidelity_kernel!(fidelity_avx, "avx", 4, _mm256_set1_pd, _mm256_loadu_pd, _mm256_storeu_pd,
+    _mm256_add_pd, _mm256_sub_pd, _mm256_mul_pd, _mm256_and_pd, _mm256_andnot_pd, fidelity_avx_eq, fidelity_avx_lt, _mm256_movemask_pd, fidelity_sse2);

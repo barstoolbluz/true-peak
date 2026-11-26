@@ -146,7 +146,7 @@ For certified HQ measurement:
 
 ## MSRV and release compiler note
 
-The crate MSRV is Rust 1.93. The supplied baseline reports an LLVM 21.1
+The crate MSRV is Rust 1.95. The supplied baseline reports an LLVM 21.1
 loop-vectorizer SIGSEGV under default optimized compilation and successful
 optimized builds with loop vectorization disabled. Run the established
 vectorizer-disabled release configuration first, followed by a separate default
@@ -225,6 +225,37 @@ processor with the actual two-minute 192 kHz stereo carrier.
 by this source revision. The inherited `fast066_numerical_probe_report.json`
 predates the native-input redesign and is retained only as baseline historical
 evidence; it is not a release qualification artifact for this implementation.
+
+## Ungated short-term loudness (audioscopy integration)
+
+`loudness::ShortTermMeter` is an additive PCM-only API. It uses the existing
+native K-weighting coefficient and role implementations, sums thirty rational
+100 ms energy blocks, and emits each complete 3-second observation with its
+exclusive end-frame timestamp. It emits below-gate values (including exact
+silence as negative infinity), does not pad EOF, and does not compute integrated
+loudness or LRA. The `LoudnessMeter`, `AlbumLoudnessBuilder`, and peak
+public interfaces remain unchanged.
+
+```rust
+use true_peak::loudness::{ChannelRole, ShortTermMeter};
+let mut meter = ShortTermMeter::new(48_000, &[ChannelRole::Mono])?;
+let pcm = vec![0.0; 144_000];
+meter.push_interleaved(&pcm, |observation| {
+    assert_eq!(observation.end_frame, 144_000);
+    assert_eq!(observation.lufs, f64::NEG_INFINITY);
+})?;
+# Ok::<(), true_peak::loudness::LoudnessError>(())
+```
+
+### Conditioned native K-weighting
+
+`NativeEbu2023` (including `LoudnessMeter::new` and all native role/metric-demand constructors) now uses the conditioned binary64 realization from 3,364 through 2,822,400 Hz, subject to the unchanged storage admission rules. `with_roles_high_fidelity` and its metric-demand/storage-limit variant select the same realization explicitly. Both short-term constructors select it over 8,000–2,822,400 Hz. Audioscopy retains its 8–768 kHz PCM contract. These are PCM sample rates, not direct DSD support.
+
+All native full-meter constructors reject nonzero rates below 3,364 Hz with `UnsupportedSampleRate` (zero still returns `InvalidSampleRate`). This is an intentional change to historical native admission: below 3,364 Hz the prescribed 1,681.974 Hz shelf lies above Nyquist, and its bilinear prewarp can yield unstable poles. The `Libebur128126` profile retains its historical 16–2,822,400 Hz admission, including the sub-Nyquist instability limitation.
+
+`Libebur128126` retains the historical fourth-order operation graph for exact compatibility, including its known ill-conditioning at high rates. It can report spurious gated energy at 2.8224 MHz. Use the native profile for reference-quality measurement. Native measurement values may change relative to releases with the old arithmetic. Window clocks, gating, channel weights, EOF policy, and peak scanning remain unchanged. Existing independent native numerical and bitwise parity contracts remain applicable to the appropriate realization, not to numerically incorrect old native values.
+
+See `FULL-RANGE-REPORT.md` in this delivery for the extended mathematical reference and its limitations; `K-WEIGHTING-REPORT.md` records the preceding research. Native qualification remains mandatory before release.
 
 ## Licence
 

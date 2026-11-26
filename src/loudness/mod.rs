@@ -8,8 +8,11 @@
 //! S16 preparation is a consumer/front-end concern and is not performed here.
 
 mod k_weighting;
+mod fidelity;
 mod simd;
 mod statistics;
+mod short_term;
+pub use short_term::{ShortTermMeter, ShortTermObservation};
 mod windows;
 
 use std::error::Error;
@@ -27,20 +30,27 @@ use windows::WindowClock;
 /// [`LoudnessMeter::with_roles_and_limit`] instead.
 pub const DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 
-/// Constructor limits retained from libebur128 1.2.6.  The native profile uses
-/// the same validated envelope until rates outside it have their own numerical
-/// qualification rather than inheriting accidental coefficient behavior.
-const MIN_SAMPLE_RATE_HZ: u32 = 16;
+// Preserve libebur128 1.2.6's historical lower admission boundary.
+const MIN_COMPATIBILITY_RATE_HZ: u32 = 16;
 const MAX_SAMPLE_RATE_HZ: u32 = 2_822_400;
+// The shelf prototype is at 1681.974450955533 Hz. Below this
+// integer rate its bilinear prewarp is outside the physical Nyquist band.
+// Reject that region for native measurement; compatibility retains admission.
+const MIN_FIDELITY_RATE_HZ: u32 = 3_364;
 const MAX_CHANNELS: usize = 64;
 
 /// The two supported loudness behaviors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LoudnessProfile {
     /// Current standards-oriented profile: full-resolution PCM, explicit roles,
-    /// rational 100 ms clocks, and the documented native LRA EOF continuation.
+    /// rational 100 ms clocks, conditioned K-weighting, and the documented
+    /// native LRA EOF continuation. Accepts PCM rates from 3,364 to 2,822,400
+    /// Hz, subject to storage admission. Lower rates are unsupported.
     NativeEbu2023,
     /// Compatibility profile matching libebur128 1.2.6 on identical prepared PCM.
+    /// Retains the fourth-order recurrence and historical rate admission
+    /// (16 to 2,822,400 Hz), including numerical limitations at high rates
+    /// and potentially unstable filtering at rates below 3,364 Hz.
     Libebur128126,
 }
 
@@ -319,7 +329,7 @@ impl fmt::Display for LoudnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSampleRate => f.write_str("sample rate must be nonzero"),
-            Self::UnsupportedSampleRate { sample_rate_hz } => write!(f, "sample rate {sample_rate_hz} Hz is outside the qualified {MIN_SAMPLE_RATE_HZ}..={MAX_SAMPLE_RATE_HZ} Hz range or does not yield finite K-weighting coefficients"),
+            Self::UnsupportedSampleRate { sample_rate_hz } => write!(f, "sample rate {sample_rate_hz} Hz is unsupported for the selected loudness constructor or does not yield finite K-weighting coefficients (native full meter: {MIN_FIDELITY_RATE_HZ}..={MAX_SAMPLE_RATE_HZ} Hz; compatibility: {MIN_COMPATIBILITY_RATE_HZ}..={MAX_SAMPLE_RATE_HZ} Hz; native short-term: 8000..={MAX_SAMPLE_RATE_HZ} Hz)"),
             Self::InvalidChannelCount => write!(f, "channel count must be in 1..={MAX_CHANNELS}"),
             Self::AmbiguousChannelLayout { channels } => write!(
                 f,
@@ -370,6 +380,7 @@ pub struct LoudnessMeter {
     simd_backend: simd::Backend,
     coefficients: KWeightingCoefficients,
     filters: Vec<FilterState>,
+    fidelity: Option<fidelity::Filter>,
     ring: Vec<f64>,
     ring_frames: usize,
     write_frame: usize,
@@ -473,10 +484,57 @@ impl LoudnessMeter {
         metric_demand: LoudnessMetricDemand,
         storage_limit_bytes: usize,
     ) -> Result<Self, LoudnessError> {
+        Self::build(
+            sample_rate_hz, roles, profile, metric_demand, storage_limit_bytes,
+        )
+    }
+
+    /// Native BS.1770 meter with conditioned binary64 K-weighting, for PCM
+    /// rates from 3,364 Hz to 2,822,400 Hz, subject to storage admission.
+    /// This is also the default realization for native meters in that range.
+    /// The libebur128 profile retains its historical arithmetic.
+    pub fn with_roles_high_fidelity(
+        sample_rate_hz: u32,
+        roles: &[ChannelRole],
+    ) -> Result<Self, LoudnessError> {
+        Self::with_roles_high_fidelity_and_metric_demand_and_limit(
+            sample_rate_hz, roles, LoudnessMetricDemand::IntegratedAndRange,
+            DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES,
+        )
+    }
+
+    /// Conditioned native meter with explicit metric demand and storage limit.
+    /// Window clocks, gating, channel weighting and EOF continuation match
+    /// `NativeEbu2023`; only the numerical realization of the filter changes.
+    pub fn with_roles_high_fidelity_and_metric_demand_and_limit(
+        sample_rate_hz: u32,
+        roles: &[ChannelRole],
+        metric_demand: LoudnessMetricDemand,
+        storage_limit_bytes: usize,
+    ) -> Result<Self, LoudnessError> {
+        Self::build(sample_rate_hz, roles, LoudnessProfile::NativeEbu2023,
+            metric_demand, storage_limit_bytes)
+    }
+
+    fn build(
+        sample_rate_hz: u32,
+        roles: &[ChannelRole],
+        profile: LoudnessProfile,
+        metric_demand: LoudnessMetricDemand,
+        storage_limit_bytes: usize,
+    ) -> Result<Self, LoudnessError> {
         if sample_rate_hz == 0 {
             return Err(LoudnessError::InvalidSampleRate);
         }
-        if !(MIN_SAMPLE_RATE_HZ..=MAX_SAMPLE_RATE_HZ).contains(&sample_rate_hz) {
+        // The profile is the single source of truth for admission and filter
+        // realization. No accepted native rate may fall back to legacy DSP.
+        let high_fidelity = profile == LoudnessProfile::NativeEbu2023;
+        let min_rate = if high_fidelity {
+            MIN_FIDELITY_RATE_HZ
+        } else {
+            MIN_COMPATIBILITY_RATE_HZ
+        };
+        if !(min_rate..=MAX_SAMPLE_RATE_HZ).contains(&sample_rate_hz) {
             return Err(LoudnessError::UnsupportedSampleRate { sample_rate_hz });
         }
         if roles.is_empty() || roles.len() > MAX_CHANNELS {
@@ -508,8 +566,13 @@ impl LoudnessMeter {
         let ring_bytes = ring_samples
             .checked_mul(std::mem::size_of::<f64>())
             .ok_or(LoudnessError::InputTooLong)?;
+        let filter_state_bytes = if high_fidelity {
+            std::mem::size_of::<fidelity::State>()
+        } else {
+            std::mem::size_of::<FilterState>()
+        };
         let filter_bytes = channels
-            .checked_mul(std::mem::size_of::<FilterState>())
+            .checked_mul(filter_state_bytes)
             .ok_or(LoudnessError::InputTooLong)?;
         let weight_bytes = channels
             .checked_mul(std::mem::size_of::<f64>())
@@ -535,10 +598,13 @@ impl LoudnessMeter {
         ring.resize(ring_samples, 0.0);
 
         let mut filters = Vec::new();
-        filters
-            .try_reserve_exact(channels)
-            .map_err(|_| LoudnessError::AllocationFailed)?;
-        filters.resize(channels, FilterState::default());
+        let fidelity = if high_fidelity {
+            Some(fidelity::Filter::new(sample_rate_hz, channels)?)
+        } else {
+            filters.try_reserve_exact(channels).map_err(|_| LoudnessError::AllocationFailed)?;
+            filters.resize(channels, FilterState::default());
+            None
+        };
 
         let mut weights = Vec::new();
         weights
@@ -559,10 +625,12 @@ impl LoudnessMeter {
             .capacity()
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|value| {
-                filters
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<FilterState>())
-                    .and_then(|bytes| value.checked_add(bytes))
+                let bytes = if let Some(f) = &fidelity {
+                    f.states.capacity().checked_mul(std::mem::size_of::<f64>())
+                } else {
+                    filters.capacity().checked_mul(std::mem::size_of::<FilterState>())
+                };
+                bytes.and_then(|bytes| value.checked_add(bytes))
             })
             .and_then(|value| {
                 weights
@@ -599,6 +667,7 @@ impl LoudnessMeter {
             simd_backend,
             coefficients,
             filters,
+            fidelity,
             ring,
             ring_frames,
             write_frame: 0,
@@ -702,7 +771,14 @@ impl LoudnessMeter {
         let include_lra = self.metric_demand.includes_range();
         self.preflight_history(target, true, include_lra)?;
 
-        if self.simd_backend.is_scalar() {
+        if self.fidelity.is_some() {
+            for frame in samples.chunks_exact(self.channels) {
+                if let Err(error) = self.process_frame_fidelity(frame, true, include_lra) {
+                    self.failed = true;
+                    return Err(error);
+                }
+            }
+        } else if self.simd_backend.is_scalar() {
             for frame in samples.chunks_exact(self.channels) {
                 if let Err(error) = self.process_frame_scalar(frame, true, include_lra) {
                     self.failed = true;
@@ -752,7 +828,11 @@ impl LoudnessMeter {
                 .try_reserve_exact(self.channels)
                 .map_err(|_| LoudnessError::AllocationFailed)?;
             zero_frame.resize(self.channels, 0.0);
-            if self.simd_backend.is_scalar() {
+            if self.fidelity.is_some() {
+                for _ in 0..continuation_frames {
+                    self.process_frame_fidelity(&zero_frame, false, true)?;
+                }
+            } else if self.simd_backend.is_scalar() {
                 for _ in 0..continuation_frames {
                     self.process_frame_scalar(&zero_frame, false, true)?;
                 }
@@ -895,6 +975,22 @@ impl LoudnessMeter {
             .iter()
             .any(|filtered| !filtered.is_finite())
         {
+            return Err(LoudnessError::NumericalRange);
+        }
+        self.finish_frame(emit_integrated, emit_lra)
+    }
+
+    fn process_frame_fidelity(
+        &mut self,
+        frame: &[f64],
+        emit_integrated: bool,
+        emit_lra: bool,
+    ) -> Result<(), LoudnessError> {
+        debug_assert_eq!(frame.len(), self.channels);
+        let base = self.write_frame.checked_mul(self.channels).ok_or(LoudnessError::InputTooLong)?;
+        let out = &mut self.ring[base..base + self.channels];
+        self.fidelity.as_mut().expect("selected fidelity path").frame(self.simd_backend, frame, out);
+        if out.iter().any(|y| !y.is_finite()) {
             return Err(LoudnessError::NumericalRange);
         }
         self.finish_frame(emit_integrated, emit_lra)
@@ -2619,6 +2715,7 @@ mod tests {
             LoudnessMetricDemand::IntegratedAndRange,
         ] {
             let mut scalar = native_meter_with_demand(48_000, &roles, demand);
+            scalar.simd_backend = simd::Backend::scalar();
             let mut vector = native_meter_with_demand(48_000, &roles, demand);
             vector.simd_backend = backend;
             let pattern = [1usize, 511, 4_800, 17, 9_601];
@@ -2635,6 +2732,7 @@ mod tests {
                 chunk_index += 1;
             }
             assert_bits_eq(&scalar.ring, &vector.ring);
+            assert_bits_eq(&scalar.fidelity.as_ref().unwrap().states, &vector.fidelity.as_ref().unwrap().states);
             for (left, right) in scalar.filters.iter().zip(&vector.filters) {
                 assert_bits_eq(&left.delay, &right.delay);
             }
@@ -2663,11 +2761,13 @@ mod tests {
         meter.simd_backend = backend;
         let ring_before = meter.ring.clone();
         let filters_before = meter.filters.clone();
+        let fidelity_before = meter.fidelity.as_ref().unwrap().states.clone();
         assert_eq!(
             meter.push_interleaved(&[0.25, 0.5, f64::NAN, 0.0]),
             Err(LoudnessError::NonFiniteSample { sample_index: 2 })
         );
         assert_bits_eq(&ring_before, &meter.ring);
+        assert_bits_eq(&fidelity_before, &meter.fidelity.as_ref().unwrap().states);
         for (left, right) in filters_before.iter().zip(&meter.filters) {
             assert_bits_eq(&left.delay, &right.delay);
         }
