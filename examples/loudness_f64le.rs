@@ -5,8 +5,8 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 
-use tonepoet_true_peak::loudness::{LoudnessMeter, LoudnessProfile};
-use tonepoet_true_peak::ReportingPeakMeter;
+use true_peak::loudness::{LoudnessMeter, LoudnessProfile};
+use true_peak::ReportingPeakMeter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -20,10 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "libebur128" => LoudnessMeter::libebur128_126_default_layout(sample_rate, channels)?,
         "native" => {
             let roles: Vec<_> = match channels {
-                1 => vec![tonepoet_true_peak::loudness::ChannelRole::Mono],
+                1 => vec![true_peak::loudness::ChannelRole::Mono],
                 2 => vec![
-                    tonepoet_true_peak::loudness::ChannelRole::Left,
-                    tonepoet_true_peak::loudness::ChannelRole::Right,
+                    true_peak::loudness::ChannelRole::Left,
+                    true_peak::loudness::ChannelRole::Right,
                 ],
                 _ => return Err("native harness supports mono/stereo".into()),
             };

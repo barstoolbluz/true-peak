@@ -1,4 +1,4 @@
-use tonepoet_true_peak::{
+use true_peak::{
     CertifiedPeakMeter, CertifiedReconstruction, EdgePolicy, PeakLevel, PeakTier,
     ReportingPeakMeter, SearchStatus, TruePeakError, FAST_ALGORITHM_REVISION,
     FAST_WALL_NANOS_PER_PROGRAMME_MINUTE, REFERENCE_INTERVAL_OBJECTIVE_DB,
@@ -22,7 +22,7 @@ fn signal(frames: usize, channels: usize) -> Vec<f64> {
 /// invariance / clone equality assertions must exclude it. No-op unless the
 /// feature is built.
 #[allow(unused_mut)]
-fn strip_timing(mut certificate: tonepoet_true_peak::PeakCertificate) -> tonepoet_true_peak::PeakCertificate {
+fn strip_timing(mut certificate: true_peak::PeakCertificate) -> true_peak::PeakCertificate {
     #[cfg(feature = "fast-stage-timing")]
     {
         let d = &mut certificate.diagnostics;

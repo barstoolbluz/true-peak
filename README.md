@@ -1,6 +1,6 @@
-# tonepoet-true-peak
+# true-peak
 
-`tonepoet-true-peak` is an application-independent streaming crate for peak
+`true-peak` is an application-independent streaming crate for peak
 measurement over decoded interleaved `f64` PCM. The certified API exposes
 exactly three HQ1024V1 tiers. Standards-compatible reporting remains separate.
 
@@ -22,7 +22,7 @@ an achieved `[lower, upper]` interval. For a hard-ceiling decision, use the
 interval upper rather than the diagnostic point estimate.
 
 ```rust
-use tonepoet_true_peak::{CertifiedPeakMeter, EdgePolicy, PeakTier};
+use true_peak::{CertifiedPeakMeter, EdgePolicy, PeakTier};
 
 let mut meter = CertifiedPeakMeter::new(
     48_000,

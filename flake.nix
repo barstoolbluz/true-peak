@@ -1,5 +1,5 @@
 {
-  description = "tonepoet-true-peak - streaming true-peak and loudness measurement for decoded PCM audio";
+  description = "true-peak - streaming true-peak and loudness measurement for decoded PCM audio";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

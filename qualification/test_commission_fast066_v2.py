@@ -48,13 +48,13 @@ class CommissionDecisionTests(unittest.TestCase):
     def test_verbose_build_parser_captures_effective_crate_and_example_invocations(self) -> None:
         stderr = (
             "Fresh num-complex v0.4.6\n"
-            "Running `/toolchain/bin/rustc --crate-name tonepoet_true_peak src/lib.rs -C codegen-units=1 -C llvm-args=--vectorize-loops=false`\n"
+            "Running `/toolchain/bin/rustc --crate-name true_peak src/lib.rs -C codegen-units=1 -C llvm-args=--vectorize-loops=false`\n"
             "Running `/toolchain/bin/rustc --crate-name bench_ceiling_f64le examples/bench_ceiling_f64le.rs -C opt-level=3`\n"
             "Running `/toolchain/bin/rustc --crate-name build_script_build build.rs`\n"
         )
         invocations = commission.rustc_invocations(stderr)
         self.assertEqual(len(invocations), 2)
-        self.assertIn("tonepoet_true_peak", invocations[0])
+        self.assertIn("true_peak", invocations[0])
         self.assertIn("bench_ceiling_f64le", invocations[1])
 
     def test_vectorizer_setting_is_recorded_from_operator_flags(self) -> None:
@@ -176,7 +176,7 @@ class CommissionDecisionTests(unittest.TestCase):
                     "cargo_target_dir": env["CARGO_TARGET_DIR"],
                     "rustflags_tokens": [],
                     "loop_vectorizer_disabled": False,
-                    "rustc_invocations": ["Running `rustc --crate-name tonepoet_true_peak`"],
+                    "rustc_invocations": ["Running `rustc --crate-name true_peak`"],
                 }
 
             with (
@@ -316,7 +316,7 @@ class CommissionDecisionTests(unittest.TestCase):
                         "cargo_target_dir": kwargs["env"]["CARGO_TARGET_DIR"],
                         "rustflags_tokens": [],
                         "loop_vectorizer_disabled": False,
-                        "rustc_invocations": ["Running `rustc --crate-name tonepoet_true_peak`"],
+                        "rustc_invocations": ["Running `rustc --crate-name true_peak`"],
                     },
                 ),
                 mock.patch.object(commission, "run_benchmark", side_effect=fake_run_benchmark),

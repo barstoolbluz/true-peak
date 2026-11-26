@@ -11,7 +11,7 @@
 use std::env;
 use std::time::Instant;
 
-use tonepoet_true_peak::loudness::{
+use true_peak::loudness::{
     ChannelRole, LoudnessMeter, LoudnessProfile, LoudnessSimdBackend,
 };
 

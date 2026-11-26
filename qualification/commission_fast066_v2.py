@@ -250,7 +250,7 @@ def rustc_invocations(verbose_stderr: str) -> list[str]:
         if "Running `" not in stripped:
             continue
         if (
-            "--crate-name tonepoet_true_peak" in stripped
+            "--crate-name true_peak" in stripped
             or f"--crate-name {BENCH_EXAMPLE}" in stripped
         ):
             selected.append(stripped)
