@@ -7,8 +7,9 @@ description = "Streaming true-peak measurement for decoded PCM audio"
 license = "GPL-2.0-or-later"
 
 [features]
-default = []
-# Opt-in native AArch64 qualification candidate; not enabled by default.
+# Native AArch64 NEON K-weighting, on by default. It gives the same results
+# as the scalar path, is compiled only on AArch64 and selects NEON at run time.
+default = ["experimental-loudness-neon"]
 experimental-loudness-neon = []
 # Commissioning-only stage attribution for the Fast066 benchmark. The normal
 # Fast backend contains no timing state or clock reads when this feature is off.
