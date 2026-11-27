@@ -4,20 +4,19 @@ use std::fmt;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::qualified_half_delay_fft::QualifiedHalfDelayFft;
 use super::hq1024_coefficients::{
     HQ1024_FIRST_HALF_DELAY_TAPS, HQ1024_HALF_DELAY_COEFFICIENTS, HQ1024_NODE_A_UPPER,
-    HQ1024_NODE_B_UPPER, HQ1024_TAIL_COEFFICIENTS, HQ1024_TAIL_FACTOR,
-    HQ1024_TAIL_NONZERO_COUNTS, HQ1024_TAIL_OFFSET_COUNT, HQ1024_TAIL_OFFSET_MAX,
-    HQ1024_TAIL_OFFSET_MIN,
+    HQ1024_NODE_B_UPPER, HQ1024_TAIL_COEFFICIENTS, HQ1024_TAIL_FACTOR, HQ1024_TAIL_NONZERO_COUNTS,
+    HQ1024_TAIL_OFFSET_COUNT, HQ1024_TAIL_OFFSET_MAX, HQ1024_TAIL_OFFSET_MIN,
 };
+use super::qualified_half_delay_fft::QualifiedHalfDelayFft;
 use super::{
     build_polyphase_filters, positive_finite_linear_to_dbtp, EdgePolicy, InternalPeakCertificate,
-    PeakInterval, PeakLevel, ReconstructionId, SearchDiagnostics, SearchPolicy, SearchStatus, TruePeakError,
-    TruePeakResult, Window, HEADROOM64_HALF_DELAY_COEFFICIENTS, HEADROOM64_HALF_DELAY_TAPS,
-    HEADROOM64_INTERPOLATION_CALIBRATION_LINEAR, HEADROOM64_STAGE_2_TAPS,
-    HEADROOM64_STAGE_3_TAPS, HEADROOM64_STAGE_4_TAPS, HEADROOM64_STAGE_5_TAPS,
-    HEADROOM64_STAGE_6_TAPS,
+    PeakInterval, PeakLevel, ReconstructionId, SearchDiagnostics, SearchPolicy, SearchStatus,
+    TruePeakError, TruePeakResult, Window, HEADROOM64_HALF_DELAY_COEFFICIENTS,
+    HEADROOM64_HALF_DELAY_TAPS, HEADROOM64_INTERPOLATION_CALIBRATION_LINEAR,
+    HEADROOM64_STAGE_2_TAPS, HEADROOM64_STAGE_3_TAPS, HEADROOM64_STAGE_4_TAPS,
+    HEADROOM64_STAGE_5_TAPS, HEADROOM64_STAGE_6_TAPS,
 };
 
 const TILE_INPUT_FRAMES: i128 = 4096;
@@ -47,20 +46,18 @@ const HQ1024_INPUT_HALO_FRAMES: i128 = 777;
 // finite arithmetic only; all product/sum bounds are derived from operation
 // counts and are widened with directed helper operations.
 const BINARY64_UNIT_ROUNDOFF: f64 = 1.0 / 9_007_199_254_740_992.0; // 2^-53
-// Absolute underflow/FTZ/DAZ allowance for one direct arithmetic operation:
-// at most two positive/negative subnormal operands can be treated as zero
-// (< 2 * MIN_NORMAL total input perturbation), a subnormal result can be
-// flushed (< 1 * MIN_NORMAL), and one additional MIN_NORMAL unit covers the
-// fused-product-residual step used by the tight evaluator.  All reconstruction
-// coefficients are normal binary64 values with |c| <= 1; the offline qualifier
-// checks that prerequisite independently.
+                                                                   // Absolute underflow/FTZ/DAZ allowance for one direct arithmetic operation:
+                                                                   // at most two positive/negative subnormal operands can be treated as zero
+                                                                   // (< 2 * MIN_NORMAL total input perturbation), a subnormal result can be
+                                                                   // flushed (< 1 * MIN_NORMAL), and one additional MIN_NORMAL unit covers the
+                                                                   // fused-product-residual step used by the tight evaluator.  All reconstruction
+                                                                   // coefficients are normal binary64 values with |c| <= 1; the offline qualifier
+                                                                   // checks that prerequisite independently.
 const DAZ_INPUT_UNITS_PER_OPERATION: f64 = 2.0;
 const FTZ_RESULT_UNITS_PER_OPERATION: f64 = 1.0;
 const FUSED_RESIDUAL_UNDERFLOW_UNITS: f64 = 1.0;
 const DIRECT_DOT_ABSOLUTE_UNDERFLOW_UNITS_PER_OPERATION: f64 =
-    DAZ_INPUT_UNITS_PER_OPERATION
-        + FTZ_RESULT_UNITS_PER_OPERATION
-        + FUSED_RESIDUAL_UNDERFLOW_UNITS;
+    DAZ_INPUT_UNITS_PER_OPERATION + FTZ_RESULT_UNITS_PER_OPERATION + FUSED_RESIDUAL_UNDERFLOW_UNITS;
 const RESCORE_FRONTIER_CAPACITY: usize = 64;
 const DENSE_CHILD_CELLS: usize = 8;
 const FAST90_CREDITS_PER_TILE_CHANNEL: u64 = 32_768;
@@ -159,7 +156,8 @@ fn outward_nonnegative(value: f64) -> f64 {
 #[inline]
 fn downward_nonnegative(value: f64) -> f64 {
     let Some(bits) = nonnegative_finite_bits(value) else {
-        return if magnitude_bits(value) == F64_INFINITY_BITS && value.to_bits() & F64_SIGN_MASK == 0 {
+        return if magnitude_bits(value) == F64_INFINITY_BITS && value.to_bits() & F64_SIGN_MASK == 0
+        {
             f64::INFINITY
         } else {
             0.0
@@ -196,9 +194,7 @@ pub(crate) fn lower_sub(magnitude: f64, error: f64) -> f64 {
     if widened_error_bits >= magnitude_bits {
         return 0.0;
     }
-    downward_nonnegative(
-        f64::from_bits(magnitude_bits) - f64::from_bits(widened_error_bits),
-    )
+    downward_nonnegative(f64::from_bits(magnitude_bits) - f64::from_bits(widened_error_bits))
 }
 
 #[inline]
@@ -337,10 +333,7 @@ impl TailMetadata {
     #[inline]
     fn node_bounds(&self, tree_index: usize) -> (f64, f64) {
         debug_assert!(tree_index > 0 && tree_index < self.factor);
-        (
-            self.node_a_upper[tree_index],
-            self.node_b_upper[tree_index],
-        )
+        (self.node_a_upper[tree_index], self.node_b_upper[tree_index])
     }
 
     #[inline]
@@ -349,11 +342,7 @@ impl TailMetadata {
     }
 }
 
-fn phase_l1_upper(
-    factor: usize,
-    offset_count: usize,
-    coefficients: &[f64],
-) -> f64 {
+fn phase_l1_upper(factor: usize, offset_count: usize, coefficients: &[f64]) -> f64 {
     debug_assert_eq!(coefficients.len(), factor * offset_count);
     let mut maximum = 0.0_f64;
     for phase in 0..factor {
@@ -367,11 +356,7 @@ fn phase_l1_upper(
     maximum
 }
 
-fn convolve_with_error(
-    left: &[f64],
-    left_error: &[f64],
-    right: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+fn convolve_with_error(left: &[f64], left_error: &[f64], right: &[f64]) -> (Vec<f64>, Vec<f64>) {
     debug_assert_eq!(left.len(), left_error.len());
     let output_len = left.len() + right.len() - 1;
     let mut output = vec![0.0; output_len];
@@ -407,17 +392,12 @@ fn convolve_with_error(
 
     let mut error = vec![0.0; output_len];
     for index in 0..output_len {
-        let rounding = dot_rounding_upper(
-            term_counts[index].saturating_mul(2),
-            absolute_sum[index],
-        );
+        let rounding =
+            dot_rounding_upper(term_counts[index].saturating_mul(2), absolute_sum[index]);
         error[index] = upper_add(propagated[index], rounding);
     }
 
-    while output.len() > 1
-        && output.last() == Some(&0.0)
-        && error.last() == Some(&0.0)
-    {
+    while output.len() > 1 && output.last() == Some(&0.0) && error.last() == Some(&0.0) {
         output.pop();
         error.pop();
     }
@@ -425,7 +405,7 @@ fn convolve_with_error(
 }
 
 fn legacy_two_x_impulse_response(taps: usize) -> Vec<f64> {
-    let delay_frames = (taps + 1) / 2;
+    let delay_frames = taps.div_ceil(2);
     let filters = build_polyphase_filters(taps, 2, delay_frames, Window::Blackman, true);
     let mut response = vec![0.0; delay_frames * 2];
     for (phase, filter) in filters.iter().enumerate() {
@@ -527,9 +507,10 @@ fn build_node_metadata(
 
             let mut q_abs_sum = CompensatedSum::default();
             for j in offset_min..=offset_max - 2 {
-                let q = compensated_sum((offset_min..=j).map(|k| {
-                    f64::from(j - k + 1) * residual[(k - offset_min) as usize]
-                }));
+                let q = compensated_sum(
+                    (offset_min..=j)
+                        .map(|k| f64::from(j - k + 1) * residual[(k - offset_min) as usize]),
+                );
                 q_abs_sum.add(q.abs());
             }
             max_a = max_a.max(q_abs_sum.total());
@@ -599,7 +580,10 @@ fn build_legacy_tail_metadata() -> TailMetadata {
         1.0,
         "Legacy64 tail identity phase changed",
     );
-    assert_eq!(nonzero_counts[0], 1, "Legacy64 identity phase is not sparse");
+    assert_eq!(
+        nonzero_counts[0], 1,
+        "Legacy64 identity phase is not sparse"
+    );
 
     let (node_a_upper, node_b_upper) = build_node_metadata(
         LEGACY_TAIL_FACTOR,
@@ -612,11 +596,8 @@ fn build_legacy_tail_metadata() -> TailMetadata {
         "Legacy64 root curvature invariant changed",
     );
 
-    let phase_l1_upper = phase_l1_upper(
-        LEGACY_TAIL_FACTOR,
-        LEGACY_TAIL_OFFSET_COUNT,
-        &coefficients,
-    );
+    let phase_l1_upper =
+        phase_l1_upper(LEGACY_TAIL_FACTOR, LEGACY_TAIL_OFFSET_COUNT, &coefficients);
     TailMetadata {
         factor: LEGACY_TAIL_FACTOR,
         offset_min: LEGACY_TAIL_OFFSET_MIN,
@@ -739,7 +720,6 @@ impl ReconstructionSpec {
         let last = coarse_end_inclusive.div_euclid(2) + half;
         (first, last)
     }
-
 }
 
 #[derive(Clone)]
@@ -971,8 +951,8 @@ impl RawBuffer {
     fn sample(&self, index: i128, channel: usize) -> f64 {
         let start = self.start_index.expect("raw buffer is non-empty");
         debug_assert!(index >= start && index <= self.last_index().unwrap_or(start));
-        let frame = self.head_frames
-            + usize::try_from(index - start).expect("bounded raw sample index");
+        let frame =
+            self.head_frames + usize::try_from(index - start).expect("bounded raw sample index");
         self.values[frame * self.channels + channel]
     }
 
@@ -985,8 +965,8 @@ impl RawBuffer {
         let buffer_start = self.start_index.expect("raw buffer is non-empty");
         let first_frame = self.head_frames
             + usize::try_from(start - buffer_start).expect("bounded raw zero-range start");
-        let frames = usize::try_from(end_inclusive - start + 1)
-            .expect("bounded raw zero-range length");
+        let frames =
+            usize::try_from(end_inclusive - start + 1).expect("bounded raw zero-range length");
         let first_sample = first_frame * self.channels;
         let last_sample = first_sample + frames * self.channels;
         self.values[first_sample..last_sample]
@@ -1009,12 +989,7 @@ impl RawBuffer {
         }
     }
 
-    fn channel_is_exact_constant(
-        &self,
-        start: i128,
-        end_inclusive: i128,
-        channel: usize,
-    ) -> bool {
+    fn channel_is_exact_constant(&self, start: i128, end_inclusive: i128, channel: usize) -> bool {
         debug_assert!(self.contains(start, end_inclusive));
         debug_assert!(channel < self.channels);
         let first = self.sample(start, channel);
@@ -1097,8 +1072,8 @@ impl StrictCoarseCache {
         debug_assert!(end_index >= start_index);
         self.start_index = start_index;
         self.end_index = end_index;
-        let frames = usize::try_from(end_index - start_index + 1)
-            .expect("bounded strict coarse cache");
+        let frames =
+            usize::try_from(end_index - start_index + 1).expect("bounded strict coarse cache");
         let samples = frames * self.channels;
         self.values.resize(samples, 0.0);
         self.errors.resize(samples, 0.0);
@@ -1134,8 +1109,6 @@ impl StrictCoarseCache {
         self.errors[offset] = evaluation.error;
         self.valid[offset] = true;
     }
-
-
 }
 
 #[derive(Debug)]
@@ -1159,7 +1132,7 @@ impl RangeMaximum {
     fn query_max(&self, mut start: usize, end: usize) -> f64 {
         debug_assert!(start < end && end <= self.values.len());
         let mut maximum = f64::NEG_INFINITY;
-        while start < end && start % RANGE_MAX_BLOCK != 0 {
+        while start < end && !start.is_multiple_of(RANGE_MAX_BLOCK) {
             maximum = maximum.max(self.values[start]);
             start += 1;
         }
@@ -1210,19 +1183,14 @@ impl CoarseMagnitudeSummary {
 
     fn magnitude_max(&self, start: i128, end_exclusive: i128) -> f64 {
         debug_assert!(end_exclusive > start && start >= self.start_index);
-        let first = usize::try_from(start - self.start_index)
-            .expect("bounded fast coarse magnitude start");
+        let first =
+            usize::try_from(start - self.start_index).expect("bounded fast coarse magnitude start");
         let last = usize::try_from(end_exclusive - self.start_index)
             .expect("bounded fast coarse magnitude end");
         self.magnitude.query_max(first, last)
     }
 
-    fn group_support_max(
-        &self,
-        tail: &TailMetadata,
-        group_start: i128,
-        group_end: i128,
-    ) -> f64 {
+    fn group_support_max(&self, tail: &TailMetadata, group_start: i128, group_end: i128) -> f64 {
         debug_assert!(group_end > group_start);
         let support_start = group_start + i128::from(tail.offset_min);
         let support_end = group_end - 1 + i128::from(tail.offset_max);
@@ -1237,12 +1205,7 @@ struct CoarseSecondDifferenceSummary {
 }
 
 impl CoarseSecondDifferenceSummary {
-    fn build(
-        buffer: &CoarseBuffer,
-        channel: usize,
-        start_index: i128,
-        end_index: i128,
-    ) -> Self {
+    fn build(buffer: &CoarseBuffer, channel: usize, start_index: i128, end_index: i128) -> Self {
         debug_assert!(end_index >= start_index + 2);
         debug_assert!(buffer.contains(start_index, end_index));
         let span = usize::try_from(end_index - start_index)
@@ -1286,10 +1249,9 @@ impl CoarseSecondDifferenceSummary {
 
     fn d2_max(&self, start: i128, end_exclusive: i128) -> f64 {
         debug_assert!(end_exclusive > start && start >= self.d2_start_index);
-        let first = usize::try_from(start - self.d2_start_index)
-            .expect("bounded coarse d2 start");
-        let last = usize::try_from(end_exclusive - self.d2_start_index)
-            .expect("bounded coarse d2 end");
+        let first = usize::try_from(start - self.d2_start_index).expect("bounded coarse d2 start");
+        let last =
+            usize::try_from(end_exclusive - self.d2_start_index).expect("bounded coarse d2 end");
         self.d2.query_max(first, last)
     }
 }
@@ -1303,12 +1265,7 @@ struct CoarseChannelSummary {
 }
 
 impl CoarseChannelSummary {
-    fn build(
-        buffer: &CoarseBuffer,
-        channel: usize,
-        start_index: i128,
-        end_index: i128,
-    ) -> Self {
+    fn build(buffer: &CoarseBuffer, channel: usize, start_index: i128, end_index: i128) -> Self {
         debug_assert!(end_index >= start_index + 2);
         debug_assert!(buffer.contains(start_index, end_index));
         let magnitude = RangeMaximum::new(
@@ -1338,8 +1295,8 @@ impl CoarseChannelSummary {
 
     fn magnitude_max(&self, start: i128, end_exclusive: i128) -> f64 {
         debug_assert!(end_exclusive > start && start >= self.start_index);
-        let first = usize::try_from(start - self.start_index)
-            .expect("bounded coarse magnitude start");
+        let first =
+            usize::try_from(start - self.start_index).expect("bounded coarse magnitude start");
         let last = usize::try_from(end_exclusive - self.start_index)
             .expect("bounded coarse magnitude end");
         self.magnitude.query_max(first, last)
@@ -1347,10 +1304,9 @@ impl CoarseChannelSummary {
 
     fn d2_max(&self, start: i128, end_exclusive: i128) -> f64 {
         debug_assert!(end_exclusive > start && start >= self.d2_start_index);
-        let first = usize::try_from(start - self.d2_start_index)
-            .expect("bounded coarse d2 start");
-        let last = usize::try_from(end_exclusive - self.d2_start_index)
-            .expect("bounded coarse d2 end");
+        let first = usize::try_from(start - self.d2_start_index).expect("bounded coarse d2 start");
+        let last =
+            usize::try_from(end_exclusive - self.d2_start_index).expect("bounded coarse d2 end");
         self.d2.query_max(first, last)
     }
 
@@ -1438,11 +1394,17 @@ impl TileEvaluationFrontier {
             return None;
         }
         if self.retained.len() < RESCORE_FRONTIER_CAPACITY {
-            self.retained.push(TrackedEvaluation { location, evaluation });
+            self.retained.push(TrackedEvaluation {
+                location,
+                evaluation,
+            });
             return None;
         }
 
-        let incoming = TrackedEvaluation { location, evaluation };
+        let incoming = TrackedEvaluation {
+            location,
+            evaluation,
+        };
         let (minimum_index, minimum) = self
             .retained
             .iter()
@@ -1465,7 +1427,9 @@ impl TileEvaluationFrontier {
 
 #[derive(Debug, Clone, Copy)]
 enum CandidateWork {
-    DenseRegion { end_cell: i128 },
+    DenseRegion {
+        end_cell: i128,
+    },
     Dyadic {
         phase_start: usize,
         phase_end: usize,
@@ -1602,7 +1566,10 @@ fn accurate_dot(pairs: impl IntoIterator<Item = (f64, f64)>) -> Evaluation {
     }
 
     if terms.is_empty() {
-        return Evaluation { value: 0.0, error: 0.0 };
+        return Evaluation {
+            value: 0.0,
+            error: 0.0,
+        };
     }
 
     let summand_count = terms.len();
@@ -1636,7 +1603,6 @@ fn accurate_dot(pairs: impl IntoIterator<Item = (f64, f64)>) -> Evaluation {
     }
 }
 
-
 #[derive(Debug, Clone)]
 struct LegacyDenseStage {
     group_delay_inputs: i128,
@@ -1664,7 +1630,11 @@ fn legacy_dense_stages() -> &'static [LegacyDenseStage] {
                 .skip(1)
                 .step_by(2)
                 .collect::<Vec<_>>();
-            assert_eq!(half_coefficients.len() % 2, 0, "Legacy dense half phase lost symmetry geometry");
+            assert_eq!(
+                half_coefficients.len() % 2,
+                0,
+                "Legacy dense half phase lost symmetry geometry"
+            );
             let pair_count = half_coefficients.len() / 2;
             let mut pair_means = Vec::with_capacity(pair_count);
             let mut pair_delta_abs = Vec::with_capacity(pair_count);
@@ -1721,9 +1691,7 @@ fn dense_stage_required_source_range(
             source_end = source_end.max(source);
         } else {
             let cell = (target - 1).div_euclid(2);
-            source_start = source_start.min(
-                cell + stage.group_delay_inputs - (half_len - 1),
-            );
+            source_start = source_start.min(cell + stage.group_delay_inputs - (half_len - 1));
             source_end = source_end.max(cell + stage.group_delay_inputs);
         }
     }
@@ -1801,11 +1769,8 @@ fn legacy_dense_ranges(final_start: i128, final_end: i128) -> Vec<(i128, i128)> 
     ranges[stages.len()] = (final_start, final_end);
     for stage_index in (0..stages.len()).rev() {
         let (target_start, target_end) = ranges[stage_index + 1];
-        ranges[stage_index] = dense_stage_required_source_range(
-            target_start,
-            target_end,
-            &stages[stage_index],
-        );
+        ranges[stage_index] =
+            dense_stage_required_source_range(target_start, target_end, &stages[stage_index]);
     }
     ranges
 }
@@ -1934,7 +1899,8 @@ impl CertifiedScanner {
 
     fn end_processing(&mut self) {
         if let Some(started) = self.processing_started.take() {
-            self.processing_time_spent = self.processing_time_spent.saturating_add(started.elapsed());
+            self.processing_time_spent =
+                self.processing_time_spent.saturating_add(started.elapsed());
         }
     }
 
@@ -1997,10 +1963,8 @@ impl CertifiedScanner {
         }
         let reconstruction_gain = self.spec.id.reconstruction_linf_gain_upper();
         let tile_upper = upper_mul(raw_peak, reconstruction_gain);
-        self.unresolved_upper_channel_peaks[channel] = max_nonnegative_finite(
-            self.unresolved_upper_channel_peaks[channel],
-            tile_upper,
-        );
+        self.unresolved_upper_channel_peaks[channel] =
+            max_nonnegative_finite(self.unresolved_upper_channel_peaks[channel], tile_upper);
     }
 
     fn retain_fast_tile_fallback(&mut self, coarse_start: i128, coarse_end: i128) {
@@ -2011,13 +1975,14 @@ impl CertifiedScanner {
 
     fn mark_fast_tile_time_limited(&mut self, coarse_start: i128, coarse_end: i128) {
         self.retain_fast_tile_fallback(coarse_start, coarse_end);
-        self.diagnostics.time_limited_tiles =
-            self.diagnostics.time_limited_tiles.saturating_add(1);
+        self.diagnostics.time_limited_tiles = self.diagnostics.time_limited_tiles.saturating_add(1);
     }
 
     /// Candidate construction has already paid for exact root uppers for the
     /// completed channels. Preserve those tighter bounds and use the raw-domain
     /// fallback only for channels whose candidate roots were never constructed.
+    // Keep the certified completed-channel bounds indexed in lockstep.
+    #[allow(clippy::needless_range_loop)]
     fn mark_fast_partial_candidate_tile_time_limited(
         &mut self,
         coarse_start: i128,
@@ -2036,8 +2001,7 @@ impl CertifiedScanner {
         for channel in completed_channels..self.channels {
             self.retain_fast_tile_fallback_channel(coarse_start, coarse_end, channel);
         }
-        self.diagnostics.time_limited_tiles =
-            self.diagnostics.time_limited_tiles.saturating_add(1);
+        self.diagnostics.time_limited_tiles = self.diagnostics.time_limited_tiles.saturating_add(1);
     }
 
     fn observe_raw_frame(&mut self, input_index: i128, frame: &[f64]) {
@@ -2068,14 +2032,11 @@ impl CertifiedScanner {
     /// Observe the qualified 2x authority stream. Integer phases carry zero
     /// error; half phases carry the fixed-prefix block enclosure derived by
     /// `qualified_half_delay_fft`.
-    fn observe_coarse_authority(
-        &mut self,
-        output_index: i128,
-        frame: &[f64],
-        errors: &[f64],
-    ) {
+    fn observe_coarse_authority(&mut self, output_index: i128, frame: &[f64], errors: &[f64]) {
         if frame.iter().any(|value| !value.is_finite())
-            || errors.iter().any(|error| !error.is_finite() || *error < 0.0)
+            || errors
+                .iter()
+                .any(|error| !error.is_finite() || *error < 0.0)
         {
             self.numerical_invalid = true;
         }
@@ -2149,18 +2110,16 @@ impl CertifiedScanner {
     ) {
         self.observe_evaluation_base(channel, evaluation);
         if magnitude_bits(evaluation.error) == 0 {
-            self.settled_evaluated_upper_channel_peaks[channel] = self
-                .settled_evaluated_upper_channel_peaks[channel]
-                .max(evaluation.upper());
+            self.settled_evaluated_upper_channel_peaks[channel] =
+                self.settled_evaluated_upper_channel_peaks[channel].max(evaluation.upper());
             return;
         }
 
         if self.policy.uses_accelerated_prefix() {
             // Standard/Fast do not spend unbounded work on strict rescoring.  The
             // ordinary direct enclosure is already authoritative.
-            self.settled_evaluated_upper_channel_peaks[channel] = self
-                .settled_evaluated_upper_channel_peaks[channel]
-                .max(evaluation.upper());
+            self.settled_evaluated_upper_channel_peaks[channel] =
+                self.settled_evaluated_upper_channel_peaks[channel].max(evaluation.upper());
             return;
         }
 
@@ -2173,9 +2132,8 @@ impl CertifiedScanner {
                 .direct_rescore_evaluations
                 .saturating_add(1);
             self.observe_evaluation_base(channel, accurate);
-            self.settled_evaluated_upper_channel_peaks[channel] = self
-                .settled_evaluated_upper_channel_peaks[channel]
-                .max(accurate.upper());
+            self.settled_evaluated_upper_channel_peaks[channel] =
+                self.settled_evaluated_upper_channel_peaks[channel].max(accurate.upper());
         }
     }
 
@@ -2194,7 +2152,10 @@ impl CertifiedScanner {
             self.spec.tail().composition_error_per_coarse_peak_upper,
             magnitude_upper,
         );
-        upper_add(upper_add(upper_add(endpoint_upper, curvature), affine), model)
+        upper_add(
+            upper_add(upper_add(endpoint_upper, curvature), affine),
+            model,
+        )
     }
 
     fn coarse_group_upper(
@@ -2234,8 +2195,7 @@ impl CertifiedScanner {
         let support_start = group_start + i128::from(tail.offset_min);
         let support_end = group_end - 1 + i128::from(tail.offset_max);
         let endpoint_upper = magnitude_summary.magnitude_max(group_start, group_end + 1);
-        let magnitude_upper =
-            magnitude_summary.magnitude_max(support_start, support_end + 1);
+        let magnitude_upper = magnitude_summary.magnitude_max(support_start, support_end + 1);
         let d2_upper = d2_summary.d2_max(support_start, support_end - 1);
         (endpoint_upper, d2_upper, magnitude_upper)
     }
@@ -2247,12 +2207,8 @@ impl CertifiedScanner {
         group_start: i128,
         group_end: i128,
     ) -> f64 {
-        let (endpoint_upper, d2_upper, magnitude_upper) = self.fast90_group_components(
-            magnitude_summary,
-            d2_summary,
-            group_start,
-            group_end,
-        );
+        let (endpoint_upper, d2_upper, magnitude_upper) =
+            self.fast90_group_components(magnitude_summary, d2_summary, group_start, group_end);
         self.bound_from_components(endpoint_upper, d2_upper, magnitude_upper, 1)
     }
 
@@ -2294,8 +2250,7 @@ impl CertifiedScanner {
         // maximum updates in the hottest mandatory loop.
         self.point_channel_peaks[channel] = point_peak;
         self.lower_channel_peaks[channel] = lower_peak;
-        self.overall_lower_peak =
-            max_nonnegative_finite(self.overall_lower_peak, lower_peak);
+        self.overall_lower_peak = max_nonnegative_finite(self.overall_lower_peak, lower_peak);
         self.diagnostics.max_evaluation_error_linear = maximum_error;
         self.diagnostics.authoritative_coarse_values = self
             .diagnostics
@@ -2309,7 +2264,11 @@ impl CertifiedScanner {
         let left = self.coarse.value(cell, channel).abs();
         let right = self.coarse.value(cell + 1, channel).abs();
         let priority = left.max(right);
-        if priority.is_finite() { priority } else { 0.0 }
+        if priority.is_finite() {
+            priority
+        } else {
+            0.0
+        }
     }
 
     fn generate_fast90_channel_candidates(
@@ -2323,7 +2282,8 @@ impl CertifiedScanner {
         let tail = self.spec.tail();
         let mut heap = BinaryHeap::new();
         let search_lower = self.overall_lower_peak;
-        let interval_count = usize::try_from(coarse_end - coarse_start).expect("bounded tile cells");
+        let interval_count =
+            usize::try_from(coarse_end - coarse_start).expect("bounded tile cells");
 
         // First reject entire 64-cell roots with the cheap L1 authority bound.
         // No second differences are needed for those roots.  Keep the
@@ -2336,8 +2296,7 @@ impl CertifiedScanner {
             let root_len = ROOT_GROUP_CELLS.min(interval_count - root_offset);
             let root_start = coarse_start + root_offset as i128;
             let root_end = root_start + root_len as i128;
-            let l1_upper =
-                self.fast90_l1_group_upper(magnitude_summary, root_start, root_end);
+            let l1_upper = self.fast90_l1_group_upper(magnitude_summary, root_start, root_end);
             self.diagnostics.authoritative_coarse_groups = self
                 .diagnostics
                 .authoritative_coarse_groups
@@ -2347,9 +2306,8 @@ impl CertifiedScanner {
                 .accelerated_l1_groups_tested
                 .saturating_add(1);
             if l1_upper <= search_lower {
-                self.resolved_pruned_upper_channel_peaks[channel] = self
-                    .resolved_pruned_upper_channel_peaks[channel]
-                    .max(l1_upper);
+                self.resolved_pruned_upper_channel_peaks[channel] =
+                    self.resolved_pruned_upper_channel_peaks[channel].max(l1_upper);
                 self.diagnostics.groups_rejected =
                     self.diagnostics.groups_rejected.saturating_add(1);
                 self.diagnostics.accelerated_l1_groups_rejected = self
@@ -2379,10 +2337,8 @@ impl CertifiedScanner {
         // dense material without content classification or runtime tuning.
         let full_support_start = coarse_start + i128::from(tail.offset_min);
         let full_support_end = coarse_end - 1 + i128::from(tail.offset_max);
-        let full_d2_values = CoarseSecondDifferenceSummary::value_count(
-            full_support_start,
-            full_support_end,
-        );
+        let full_d2_values =
+            CoarseSecondDifferenceSummary::value_count(full_support_start, full_support_end);
         let full_d2_summary = (sparse_d2_values >= full_d2_values).then(|| {
             CoarseSecondDifferenceSummary::build(
                 &self.coarse,
@@ -2412,26 +2368,20 @@ impl CertifiedScanner {
                 .accelerated_curvature_roots
                 .saturating_add(1);
 
-            let root_upper = self.fast90_coarse_group_upper(
-                magnitude_summary,
-                d2_summary,
-                root_start,
-                root_end,
-            );
+            let root_upper =
+                self.fast90_coarse_group_upper(magnitude_summary, d2_summary, root_start, root_end);
             self.diagnostics.authoritative_coarse_groups = self
                 .diagnostics
                 .authoritative_coarse_groups
                 .saturating_add(1);
             if root_upper <= search_lower {
-                self.resolved_pruned_upper_channel_peaks[channel] = self
-                    .resolved_pruned_upper_channel_peaks[channel]
-                    .max(root_upper);
+                self.resolved_pruned_upper_channel_peaks[channel] =
+                    self.resolved_pruned_upper_channel_peaks[channel].max(root_upper);
                 self.diagnostics.groups_rejected =
                     self.diagnostics.groups_rejected.saturating_add(1);
                 continue;
             }
-            self.diagnostics.groups_expanded =
-                self.diagnostics.groups_expanded.saturating_add(1);
+            self.diagnostics.groups_expanded = self.diagnostics.groups_expanded.saturating_add(1);
 
             let mut child_offset = 0usize;
             while child_offset < root_len {
@@ -2449,9 +2399,8 @@ impl CertifiedScanner {
                     .authoritative_coarse_groups
                     .saturating_add(1);
                 if child_upper <= search_lower {
-                    self.resolved_pruned_upper_channel_peaks[channel] = self
-                        .resolved_pruned_upper_channel_peaks[channel]
-                        .max(child_upper);
+                    self.resolved_pruned_upper_channel_peaks[channel] =
+                        self.resolved_pruned_upper_channel_peaks[channel].max(child_upper);
                     self.diagnostics.groups_rejected =
                         self.diagnostics.groups_rejected.saturating_add(1);
                     child_offset += child_len;
@@ -2463,18 +2412,9 @@ impl CertifiedScanner {
                 for local in 0..child_len {
                     let cell = child_start + local as i128;
                     let (endpoint_upper, d2_upper, magnitude_upper) =
-                        self.fast90_group_components(
-                            magnitude_summary,
-                            d2_summary,
-                            cell,
-                            cell + 1,
-                        );
-                    let upper = self.bound_from_components(
-                        endpoint_upper,
-                        d2_upper,
-                        magnitude_upper,
-                        1,
-                    );
+                        self.fast90_group_components(magnitude_summary, d2_summary, cell, cell + 1);
+                    let upper =
+                        self.bound_from_components(endpoint_upper, d2_upper, magnitude_upper, 1);
                     self.diagnostics.authoritative_coarse_groups = self
                         .diagnostics
                         .authoritative_coarse_groups
@@ -2482,19 +2422,14 @@ impl CertifiedScanner {
                     self.diagnostics.candidate_cells =
                         self.diagnostics.candidate_cells.saturating_add(1);
                     if upper <= search_lower {
-                        self.resolved_pruned_upper_channel_peaks[channel] = self
-                            .resolved_pruned_upper_channel_peaks[channel]
-                            .max(upper);
+                        self.resolved_pruned_upper_channel_peaks[channel] =
+                            self.resolved_pruned_upper_channel_peaks[channel].max(upper);
                         continue;
                     }
 
                     let left = self.coarse.evaluation(cell, channel);
                     let right = self.coarse.evaluation(cell + 1, channel);
-                    self.observe_target_evaluation(
-                        channel,
-                        KnotLocation { cell, phase: 0 },
-                        left,
-                    );
+                    self.observe_target_evaluation(channel, KnotLocation { cell, phase: 0 }, left);
                     self.observe_target_evaluation(
                         channel,
                         KnotLocation {
@@ -2543,7 +2478,8 @@ impl CertifiedScanner {
         );
         let mut heap = BinaryHeap::new();
         let search_lower = self.overall_lower_peak;
-        let interval_count = usize::try_from(coarse_end - coarse_start).expect("bounded tile cells");
+        let interval_count =
+            usize::try_from(coarse_end - coarse_start).expect("bounded tile cells");
         debug_assert_eq!(resolved_flat_cells.len(), interval_count);
 
         let mut root_offset = 0usize;
@@ -2559,12 +2495,13 @@ impl CertifiedScanner {
                 continue;
             }
             let root_upper = self.coarse_group_upper(&summary, root_start, root_end);
-            self.diagnostics.authoritative_coarse_groups =
-                self.diagnostics.authoritative_coarse_groups.saturating_add(1);
+            self.diagnostics.authoritative_coarse_groups = self
+                .diagnostics
+                .authoritative_coarse_groups
+                .saturating_add(1);
             if root_upper <= search_lower {
-                self.resolved_pruned_upper_channel_peaks[channel] = self
-                    .resolved_pruned_upper_channel_peaks[channel]
-                    .max(root_upper);
+                self.resolved_pruned_upper_channel_peaks[channel] =
+                    self.resolved_pruned_upper_channel_peaks[channel].max(root_upper);
                 self.diagnostics.groups_rejected =
                     self.diagnostics.groups_rejected.saturating_add(1);
                 root_offset += root_len;
@@ -2586,12 +2523,13 @@ impl CertifiedScanner {
                     continue;
                 }
                 let child_upper = self.coarse_group_upper(&summary, child_start, child_end);
-                self.diagnostics.authoritative_coarse_groups =
-                    self.diagnostics.authoritative_coarse_groups.saturating_add(1);
+                self.diagnostics.authoritative_coarse_groups = self
+                    .diagnostics
+                    .authoritative_coarse_groups
+                    .saturating_add(1);
                 if child_upper <= search_lower {
-                    self.resolved_pruned_upper_channel_peaks[channel] = self
-                        .resolved_pruned_upper_channel_peaks[channel]
-                        .max(child_upper);
+                    self.resolved_pruned_upper_channel_peaks[channel] =
+                        self.resolved_pruned_upper_channel_peaks[channel].max(child_upper);
                     self.diagnostics.groups_rejected =
                         self.diagnostics.groups_rejected.saturating_add(1);
                     child_offset += child_len;
@@ -2608,20 +2546,17 @@ impl CertifiedScanner {
                     let cell = child_start + local as i128;
                     let (endpoint_upper, d2_upper, magnitude_upper) =
                         summary.root_components(tail, cell, cell + 1);
-                    let upper = self.bound_from_components(
-                        endpoint_upper,
-                        d2_upper,
-                        magnitude_upper,
-                        1,
-                    );
-                    self.diagnostics.authoritative_coarse_groups =
-                        self.diagnostics.authoritative_coarse_groups.saturating_add(1);
+                    let upper =
+                        self.bound_from_components(endpoint_upper, d2_upper, magnitude_upper, 1);
+                    self.diagnostics.authoritative_coarse_groups = self
+                        .diagnostics
+                        .authoritative_coarse_groups
+                        .saturating_add(1);
                     self.diagnostics.candidate_cells =
                         self.diagnostics.candidate_cells.saturating_add(1);
                     if upper <= search_lower {
-                        self.resolved_pruned_upper_channel_peaks[channel] = self
-                            .resolved_pruned_upper_channel_peaks[channel]
-                            .max(upper);
+                        self.resolved_pruned_upper_channel_peaks[channel] =
+                            self.resolved_pruned_upper_channel_peaks[channel].max(upper);
                     } else {
                         let left = self.coarse.evaluation(cell, channel);
                         let right = self.coarse.evaluation(cell + 1, channel);
@@ -2658,19 +2593,27 @@ impl CertifiedScanner {
                         channel,
                         upper,
                         screening_priority: priority,
-                        work: CandidateWork::DenseRegion { end_cell: child_end },
+                        work: CandidateWork::DenseRegion {
+                            end_cell: child_end,
+                        },
                     });
                 } else {
                     for node in cells {
                         if let CandidateWork::Dyadic { left, right, .. } = node.work {
                             self.observe_target_evaluation(
                                 channel,
-                                KnotLocation { cell: node.cell, phase: 0 },
+                                KnotLocation {
+                                    cell: node.cell,
+                                    phase: 0,
+                                },
                                 left,
                             );
                             self.observe_target_evaluation(
                                 channel,
-                                KnotLocation { cell: node.cell + 1, phase: 0 },
+                                KnotLocation {
+                                    cell: node.cell + 1,
+                                    phase: 0,
+                                },
                                 right,
                             );
                         }
@@ -2694,10 +2637,7 @@ impl CertifiedScanner {
             let sample = self.raw.sample(source_center - tap as i128, channel);
             let product = coefficient * sample;
             sums[tap & 3] += product;
-            absolute_sum = upper_add(
-                absolute_sum,
-                upper_mul(coefficient.abs(), sample.abs()),
-            );
+            absolute_sum = upper_add(absolute_sum, upper_mul(coefficient.abs(), sample.abs()));
         }
         let value = (sums[0] + sums[1]) + (sums[2] + sums[3]);
         let operations = self.spec.first_taps.saturating_mul(2).saturating_add(8);
@@ -2755,7 +2695,8 @@ impl CertifiedScanner {
         let right = self.strict_coarse_evaluation(cell + 1, channel);
         let mut magnitude_upper = 0.0_f64;
         for index in support_start..=support_end {
-            magnitude_upper = magnitude_upper.max(self.strict_coarse_evaluation(index, channel).upper());
+            magnitude_upper =
+                magnitude_upper.max(self.strict_coarse_evaluation(index, channel).upper());
         }
 
         let mut d2_upper = 0.0_f64;
@@ -2802,7 +2743,8 @@ impl CertifiedScanner {
             term_index += 1;
         }
         let value = (sums[0] + sums[1]) + (sums[2] + sums[3]);
-        let rounding = dot_rounding_upper(term_index.saturating_mul(2).saturating_add(8), absolute_sum);
+        let rounding =
+            dot_rounding_upper(term_index.saturating_mul(2).saturating_add(8), absolute_sum);
         let model = upper_mul(
             self.spec.tail().composition_error_per_coarse_peak_upper,
             local_magnitude,
@@ -2813,11 +2755,7 @@ impl CertifiedScanner {
         }
     }
 
-    fn accurate_target_evaluation(
-        &self,
-        location: KnotLocation,
-        channel: usize,
-    ) -> Evaluation {
+    fn accurate_target_evaluation(&self, location: KnotLocation, channel: usize) -> Evaluation {
         if location.phase == 0 {
             return self.accurate_direct_coarse(location.cell, channel);
         }
@@ -2831,14 +2769,9 @@ impl CertifiedScanner {
             if coefficient == 0.0 {
                 continue;
             }
-            let evaluation = self.accurate_direct_coarse(
-                location.cell + i128::from(offset),
-                channel,
-            );
-            propagated = upper_add(
-                propagated,
-                upper_mul(coefficient.abs(), evaluation.error),
-            );
+            let evaluation =
+                self.accurate_direct_coarse(location.cell + i128::from(offset), channel);
+            propagated = upper_add(propagated, upper_mul(coefficient.abs(), evaluation.error));
             local_magnitude = local_magnitude.max(evaluation.upper());
             coarse.push((coefficient, evaluation.value));
         }
@@ -2852,7 +2785,6 @@ impl CertifiedScanner {
             error: upper_add(upper_add(dot.error, propagated), model),
         }
     }
-
 
     fn child_node(
         &self,
@@ -2894,7 +2826,8 @@ impl CertifiedScanner {
             return None;
         }
         let endpoint_upper = left.upper().max(right.upper());
-        let upper = self.bound_from_components(endpoint_upper, d2_upper, magnitude_upper, tree_index);
+        let upper =
+            self.bound_from_components(endpoint_upper, d2_upper, magnitude_upper, tree_index);
         Some(CandidateNode {
             cell: parent.cell,
             channel: parent.channel,
@@ -2912,6 +2845,8 @@ impl CertifiedScanner {
         })
     }
 
+    // Explicit interval coordinates and enclosures avoid a transient wrapper.
+    #[allow(clippy::too_many_arguments)]
     fn interval_node(
         &self,
         cell: i128,
@@ -2988,10 +2923,8 @@ impl CertifiedScanner {
                 let sparse_control = NODE_PROCESSING_CREDITS
                     .saturating_mul(7)
                     .saturating_mul(cell_count as u64);
-                let dense_control = NODE_PROCESSING_CREDITS
-                    .saturating_mul(cell_count as u64);
-                phase_cost.saturating_add(dense_control)
-                    < phase_cost.saturating_add(sparse_control)
+                let dense_control = NODE_PROCESSING_CREDITS.saturating_mul(cell_count as u64);
+                phase_cost.saturating_add(dense_control) < phase_cost.saturating_add(sparse_control)
             }
         }
     }
@@ -3036,6 +2969,8 @@ impl CertifiedScanner {
         result
     }
 
+    // Keep the fixed quarter-phase indexing graph used by the search proof.
+    #[allow(clippy::needless_range_loop)]
     fn process_dense_region(
         &mut self,
         start_cell: i128,
@@ -3077,9 +3012,8 @@ impl CertifiedScanner {
                 1,
             );
             if root_upper <= self.overall_lower_peak {
-                self.resolved_pruned_upper_channel_peaks[channel] = self
-                    .resolved_pruned_upper_channel_peaks[channel]
-                    .max(root_upper);
+                self.resolved_pruned_upper_channel_peaks[channel] =
+                    self.resolved_pruned_upper_channel_peaks[channel].max(root_upper);
                 all_quarters_live = false;
                 continue;
             }
@@ -3098,13 +3032,11 @@ impl CertifiedScanner {
                     .tail()
                     .phase_product_count(phase)
                     .saturating_add(NODE_PROCESSING_CREDITS);
-                self.diagnostics.work_credits_consumed =
-                    self.diagnostics.work_credits_consumed.saturating_add(charge);
-                self.observe_target_evaluation(
-                    channel,
-                    KnotLocation { cell, phase },
-                    evaluation,
-                );
+                self.diagnostics.work_credits_consumed = self
+                    .diagnostics
+                    .work_credits_consumed
+                    .saturating_add(charge);
+                self.observe_target_evaluation(channel, KnotLocation { cell, phase }, evaluation);
                 knots[ordinal] = evaluation;
             }
             self.diagnostics.dense_intermediate_cells =
@@ -3128,9 +3060,8 @@ impl CertifiedScanner {
                 if node.upper > self.overall_lower_peak {
                     live_quarters.push(node);
                 } else {
-                    self.resolved_pruned_upper_channel_peaks[channel] = self
-                        .resolved_pruned_upper_channel_peaks[channel]
-                        .max(node.upper);
+                    self.resolved_pruned_upper_channel_peaks[channel] =
+                        self.resolved_pruned_upper_channel_peaks[channel].max(node.upper);
                 }
             }
             if live_quarters.len() != 4 {
@@ -3150,8 +3081,8 @@ impl CertifiedScanner {
             self.diagnostics.dense_complete_regions =
                 self.diagnostics.dense_complete_regions.saturating_add(1);
             let block = self.legacy_dense_block(start_cell, end_cell, channel);
-            let block_charge = legacy_dense_eight_cell_product_estimate()
-                .saturating_add(NODE_PROCESSING_CREDITS);
+            let block_charge =
+                legacy_dense_eight_cell_product_estimate().saturating_add(NODE_PROCESSING_CREDITS);
             self.diagnostics.work_credits_consumed = self
                 .diagnostics
                 .work_credits_consumed
@@ -3184,6 +3115,8 @@ impl CertifiedScanner {
         }
     }
 
+    // Keep per-channel credit and heap indices in the qualified search graph.
+    #[allow(clippy::needless_range_loop)]
     fn process_global_heap(
         &mut self,
         mut heap: BinaryHeap<CandidateNode>,
@@ -3194,7 +3127,9 @@ impl CertifiedScanner {
         let mut available = (0..self.channels)
             .map(|channel| match self.policy {
                 SearchPolicy::Reference9 | SearchPolicy::RetiredClockFast1s => u64::MAX,
-                SearchPolicy::Fast90 => base_allowance.saturating_add(self.carried_credits[channel]),
+                SearchPolicy::Fast90 => {
+                    base_allowance.saturating_add(self.carried_credits[channel])
+                }
             })
             .collect::<Vec<_>>();
         let mut work_exhausted = vec![false; self.channels];
@@ -3205,9 +3140,8 @@ impl CertifiedScanner {
         while let Some(node) = heap.pop() {
             let channel = node.channel;
             if node.upper <= self.overall_lower_peak {
-                self.resolved_pruned_upper_channel_peaks[channel] = self
-                    .resolved_pruned_upper_channel_peaks[channel]
-                    .max(node.upper);
+                self.resolved_pruned_upper_channel_peaks[channel] =
+                    self.resolved_pruned_upper_channel_peaks[channel].max(node.upper);
                 continue;
             }
 
@@ -3216,20 +3150,19 @@ impl CertifiedScanner {
             // still-live candidate without draining the heap after the deadline.
             // Those roots remain authoritative even when their coarse inputs
             // came from the time-bounded FIR-L1 prefix enclosure.
-            if self.policy == SearchPolicy::RetiredClockFast1s && self.fast_time_budget_exhausted() {
+            if self.policy == SearchPolicy::RetiredClockFast1s && self.fast_time_budget_exhausted()
+            {
                 time_limited = true;
                 for (channel, root_upper) in root_upper_by_channel.iter().copied().enumerate() {
-                    self.unresolved_upper_channel_peaks[channel] = self
-                        .unresolved_upper_channel_peaks[channel]
-                        .max(root_upper);
+                    self.unresolved_upper_channel_peaks[channel] =
+                        self.unresolved_upper_channel_peaks[channel].max(root_upper);
                 }
                 break;
             }
 
             if work_exhausted[channel] {
-                self.unresolved_upper_channel_peaks[channel] = self
-                    .unresolved_upper_channel_peaks[channel]
-                    .max(node.upper);
+                self.unresolved_upper_channel_peaks[channel] =
+                    self.unresolved_upper_channel_peaks[channel].max(node.upper);
                 continue;
             }
 
@@ -3260,9 +3193,8 @@ impl CertifiedScanner {
                     if self.policy == SearchPolicy::Fast90 && charge > available[channel] {
                         work_exhausted[channel] = true;
                         work_limited = true;
-                        self.unresolved_upper_channel_peaks[channel] = self
-                            .unresolved_upper_channel_peaks[channel]
-                            .max(node.upper);
+                        self.unresolved_upper_channel_peaks[channel] =
+                            self.unresolved_upper_channel_peaks[channel].max(node.upper);
                         continue;
                     }
                     if self.policy == SearchPolicy::Fast90 {
@@ -3280,10 +3212,8 @@ impl CertifiedScanner {
                         .diagnostics
                         .work_credits_consumed
                         .saturating_add(charge);
-                    self.diagnostics.phase_evaluations = self
-                        .diagnostics
-                        .phase_evaluations
-                        .saturating_add(1);
+                    self.diagnostics.phase_evaluations =
+                        self.diagnostics.phase_evaluations.saturating_add(1);
                     if tree_index == 1 {
                         refined_roots = refined_roots.saturating_add(1);
                     }
@@ -3302,25 +3232,24 @@ impl CertifiedScanner {
                         if left.upper > self.overall_lower_peak {
                             heap.push(left);
                         } else {
-                            self.resolved_pruned_upper_channel_peaks[channel] = self
-                                .resolved_pruned_upper_channel_peaks[channel]
-                                .max(left.upper);
+                            self.resolved_pruned_upper_channel_peaks[channel] =
+                                self.resolved_pruned_upper_channel_peaks[channel].max(left.upper);
                         }
                     }
                     if let Some(right) = self.child_node(node, false, midpoint_phase, midpoint) {
                         if right.upper > self.overall_lower_peak {
                             heap.push(right);
                         } else {
-                            self.resolved_pruned_upper_channel_peaks[channel] = self
-                                .resolved_pruned_upper_channel_peaks[channel]
-                                .max(right.upper);
+                            self.resolved_pruned_upper_channel_peaks[channel] =
+                                self.resolved_pruned_upper_channel_peaks[channel].max(right.upper);
                         }
                     }
                 }
             }
         }
 
-        self.diagnostics.refined_cells = self.diagnostics.refined_cells.saturating_add(refined_roots);
+        self.diagnostics.refined_cells =
+            self.diagnostics.refined_cells.saturating_add(refined_roots);
         if self.policy == SearchPolicy::Fast90 {
             let maximum_carry = base_allowance.saturating_mul(FAST90_MAX_CARRY_TILES);
             for channel in 0..self.channels {
@@ -3357,9 +3286,8 @@ impl CertifiedScanner {
                     .direct_rescore_evaluations
                     .saturating_add(1);
                 self.observe_evaluation_base(channel, accurate);
-                self.settled_evaluated_upper_channel_peaks[channel] = self
-                    .settled_evaluated_upper_channel_peaks[channel]
-                    .max(accurate.upper());
+                self.settled_evaluated_upper_channel_peaks[channel] =
+                    self.settled_evaluated_upper_channel_peaks[channel].max(accurate.upper());
             }
         }
     }
@@ -3403,9 +3331,8 @@ impl CertifiedScanner {
         // coarse parities in its settled upper authority.
         for evaluation in coarse_by_parity {
             self.observe_evaluation_base(channel, evaluation);
-            self.settled_evaluated_upper_channel_peaks[channel] = self
-                .settled_evaluated_upper_channel_peaks[channel]
-                .max(evaluation.upper());
+            self.settled_evaluated_upper_channel_peaks[channel] =
+                self.settled_evaluated_upper_channel_peaks[channel].max(evaluation.upper());
         }
 
         for cell_offset in 0..representatives {
@@ -3439,13 +3366,10 @@ impl CertifiedScanner {
                 };
 
                 self.observe_evaluation_base(channel, evaluation);
-                self.settled_evaluated_upper_channel_peaks[channel] = self
-                    .settled_evaluated_upper_channel_peaks[channel]
-                    .max(evaluation.upper());
-                self.diagnostics.phase_evaluations = self
-                    .diagnostics
-                    .phase_evaluations
-                    .saturating_add(1);
+                self.settled_evaluated_upper_channel_peaks[channel] =
+                    self.settled_evaluated_upper_channel_peaks[channel].max(evaluation.upper());
+                self.diagnostics.phase_evaluations =
+                    self.diagnostics.phase_evaluations.saturating_add(1);
             }
         }
     }
@@ -3486,9 +3410,7 @@ impl CertifiedScanner {
             while next_change < changes.len() && changes[next_change] <= cell_raw_start {
                 next_change += 1;
             }
-            flat.push(
-                next_change == changes.len() || changes[next_change] > cell_raw_end,
-            );
+            flat.push(next_change == changes.len() || changes[next_change] > cell_raw_end);
         }
         flat
     }
@@ -3623,39 +3545,34 @@ impl CertifiedScanner {
         for channel in 0..self.channels {
             let candidates = match self.policy {
                 SearchPolicy::Reference9 => {
-                    if self.raw.channel_is_exact_constant(raw_start, raw_end, channel) {
+                    if self
+                        .raw
+                        .channel_is_exact_constant(raw_start, raw_end, channel)
+                    {
                         self.resolve_reference_constant_span(coarse_start, coarse_end, channel);
                         continue;
                     }
                     let flat_cells =
                         self.reference_flat_cell_mask(coarse_start, coarse_end, channel);
                     self.resolve_reference_flat_runs(coarse_start, &flat_cells, channel);
-                    self.generate_channel_candidates(
-                        channel,
-                        coarse_start,
-                        coarse_end,
-                        &flat_cells,
-                    )
+                    self.generate_channel_candidates(channel, coarse_start, coarse_end, &flat_cells)
                 }
-                SearchPolicy::Fast90 | SearchPolicy::RetiredClockFast1s => {
-                    self.generate_fast90_channel_candidates(
+                SearchPolicy::Fast90 | SearchPolicy::RetiredClockFast1s => self
+                    .generate_fast90_channel_candidates(
                         channel,
                         coarse_start,
                         coarse_end,
                         &fast90_magnitude_summaries
                             .as_ref()
-                            .expect("Fast90 magnitude summaries")
-                            [channel],
-                    )
-                }
+                            .expect("Fast90 magnitude summaries")[channel],
+                    ),
             };
             for candidate in &candidates {
                 root_upper_by_channel[channel] =
                     root_upper_by_channel[channel].max(candidate.upper);
             }
             heap.extend(candidates);
-            if self.policy == SearchPolicy::RetiredClockFast1s
-                && self.fast_time_budget_exhausted()
+            if self.policy == SearchPolicy::RetiredClockFast1s && self.fast_time_budget_exhausted()
             {
                 self.mark_fast_partial_candidate_tile_time_limited(
                     coarse_start,
@@ -3679,6 +3596,8 @@ impl CertifiedScanner {
         self.settle_tile_frontiers();
     }
 
+    // Keep the certified channel-bound and input-peak reductions in index order.
+    #[allow(clippy::needless_range_loop)]
     fn finalize(
         mut self,
         frames: u64,
@@ -3691,16 +3610,16 @@ impl CertifiedScanner {
         let last_frame = i128::from(frames - 1);
         let coarse_start = self.next_tile_start_frame * 2;
         let coarse_end = last_frame * 2;
-        if coarse_start < coarse_end {
+        if coarse_start <= coarse_end {
             if !self.ranges_available(coarse_start, coarse_end) {
                 return Err(TruePeakError::NumericalOverflow);
             }
-            self.process_tile(self.next_tile_start_frame, last_frame, coarse_start, coarse_end);
-        } else if coarse_start == coarse_end {
-            if !self.ranges_available(coarse_start, coarse_end) {
-                return Err(TruePeakError::NumericalOverflow);
-            }
-            self.process_tile(self.next_tile_start_frame, last_frame, coarse_start, coarse_end);
+            self.process_tile(
+                self.next_tile_start_frame,
+                last_frame,
+                coarse_start,
+                coarse_end,
+            );
         }
         if self.numerical_invalid {
             return Err(TruePeakError::NumericalOverflow);
@@ -3808,7 +3727,6 @@ impl CertifiedScanner {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(super) struct CertifiedPeakMeterImpl {
     spec: ReconstructionSpec,
@@ -3837,8 +3755,7 @@ impl CertifiedPeakMeterImpl {
         if channels == 0 {
             return Err(TruePeakError::InvalidChannelCount);
         }
-        let construction_started =
-            (policy == SearchPolicy::RetiredClockFast1s).then(Instant::now);
+        let construction_started = (policy == SearchPolicy::RetiredClockFast1s).then(Instant::now);
         let spec = ReconstructionSpec::for_id(reconstruction);
         let engine = CertifiedTwoXEngine::new(spec, policy, channels);
         let mut scanner = CertifiedScanner::new_at_rate(spec, policy, channels, sample_rate_hz);
@@ -3881,8 +3798,9 @@ impl CertifiedPeakMeterImpl {
                     .force_fast90_same_graph_avx_for_qualification(use_avx)?;
             }
         }
-        self.scanner.diagnostics.accelerated_same_graph_avx_prefix_active =
-            self.engine.fast90_same_graph_avx_active();
+        self.scanner
+            .diagnostics
+            .accelerated_same_graph_avx_prefix_active = self.engine.fast90_same_graph_avx_active();
         Ok(())
     }
 
@@ -3890,7 +3808,7 @@ impl CertifiedPeakMeterImpl {
         let validation_started =
             (self.scanner.policy == SearchPolicy::RetiredClockFast1s).then(Instant::now);
         let channels = self.last_frame.len();
-        if samples.len() % channels != 0 {
+        if !samples.len().is_multiple_of(channels) {
             return Err(TruePeakError::IncompleteFrame {
                 samples: samples.len(),
                 channels,
@@ -3971,7 +3889,8 @@ impl CertifiedPeakMeterImpl {
                 .process_frame(&extension, input_index, &mut self.scanner);
         }
         self.engine.flush(&mut self.scanner);
-        self.scanner.finalize(self.frames, &self.input_channel_peaks)
+        self.scanner
+            .finalize(self.frames, &self.input_channel_peaks)
     }
 }
 
@@ -3979,8 +3898,7 @@ impl CertifiedPeakMeterImpl {
 mod tests {
     use super::*;
     use crate::hq1024_coefficients::{
-        HQ1024_DELAY_SUBFRAMES, HQ1024_MEASURED_OPERATOR_LINF,
-        HQ1024_TAIL_DELAY_SUBFRAMES,
+        HQ1024_DELAY_SUBFRAMES, HQ1024_MEASURED_OPERATOR_LINF, HQ1024_TAIL_DELAY_SUBFRAMES,
     };
     use crate::HQ1024V1_RECONSTRUCTION_LINF_GAIN_UPPER;
 
@@ -4085,6 +4003,8 @@ mod tests {
         sum
     }
 
+    // Keep the independent direct oracle's original indexed traversal.
+    #[allow(clippy::needless_range_loop)]
     fn exhaustive_peak(
         reconstruction: ReconstructionId,
         interleaved: &[f64],
@@ -4142,14 +4062,7 @@ mod tests {
     ) -> f64 {
         let spec = ReconstructionSpec::for_id(reconstruction);
         if location.phase == 0 {
-            return direct_coarse(
-                spec,
-                interleaved,
-                channels,
-                location.cell,
-                channel,
-                edge,
-            );
+            return direct_coarse(spec, interleaved, channels, location.cell, channel, edge);
         }
         let tail = spec.tail();
         assert!(location.phase < tail.factor);
@@ -4185,7 +4098,10 @@ mod tests {
     fn frozen_geometry_and_curvature_metadata_match_the_design() {
         let legacy = legacy_tail_metadata();
         let hq = hq_tail_metadata();
-        assert_eq!((legacy.factor, legacy.offset_min, legacy.offset_max), (32, -15, 16));
+        assert_eq!(
+            (legacy.factor, legacy.offset_min, legacy.offset_max),
+            (32, -15, 16)
+        );
         assert_eq!((hq.factor, hq.offset_min, hq.offset_max), (512, -16, 17));
         assert_eq!(HQ1024_DELAY_SUBFRAMES, 795_354);
         assert_eq!(HQ1024_TAIL_DELAY_SUBFRAMES, 8_922);
@@ -4206,14 +4122,8 @@ mod tests {
         edge: EdgePolicy,
         chunk_frames: usize,
     ) -> InternalPeakCertificate {
-        let mut meter = CertifiedPeakMeterImpl::new(
-            192_000,
-            channels,
-            edge,
-            reconstruction,
-            policy,
-        )
-        .unwrap();
+        let mut meter =
+            CertifiedPeakMeterImpl::new(192_000, channels, edge, reconstruction, policy).unwrap();
         let width = chunk_frames * channels;
         for chunk in interleaved.chunks(width) {
             meter.push_interleaved(chunk).unwrap();
@@ -4262,7 +4172,10 @@ mod tests {
         }
 
         let flat = scanner.reference_flat_cell_mask(coarse_start, coarse_end, 0);
-        assert_eq!(flat.len(), usize::try_from(coarse_end - coarse_start).unwrap());
+        assert_eq!(
+            flat.len(),
+            usize::try_from(coarse_end - coarse_start).unwrap()
+        );
         assert!(flat.iter().any(|value| *value));
         assert!(flat.iter().any(|value| !*value));
 
@@ -4358,14 +4271,8 @@ mod tests {
         assert!(chunk_pattern_frames.iter().all(|frames| *frames > 0));
         assert_eq!(interleaved.len() % channels, 0);
 
-        let mut meter = CertifiedPeakMeterImpl::new(
-            192_000,
-            channels,
-            edge,
-            reconstruction,
-            policy,
-        )
-        .unwrap();
+        let mut meter =
+            CertifiedPeakMeterImpl::new(192_000, channels, edge, reconstruction, policy).unwrap();
         let total_frames = interleaved.len() / channels;
         let mut frame = 0usize;
         let mut pattern_index = 0usize;
@@ -4381,11 +4288,7 @@ mod tests {
         meter.finalize().unwrap()
     }
 
-    fn legacy_direct_oracle_peak(
-        interleaved: &[f64],
-        channels: usize,
-        edge: EdgePolicy,
-    ) -> f64 {
+    fn legacy_direct_oracle_peak(interleaved: &[f64], channels: usize, edge: EdgePolicy) -> f64 {
         crate::legacy_headroom64_direct_oracle_peak(interleaved, channels, edge).unwrap()
     }
 
@@ -4395,10 +4298,7 @@ mod tests {
         let mut scanner = CertifiedScanner::new(spec, SearchPolicy::Reference9, 1);
         for frame in -spec.input_halo_frames..=spec.input_halo_frames + 32 {
             let x = frame as f64;
-            scanner.observe_raw_frame(
-                frame,
-                &[0.71 * (0.37 * x).sin() + 0.22 * (1.11 * x).cos()],
-            );
+            scanner.observe_raw_frame(frame, &[0.71 * (0.37 * x).sin() + 0.22 * (1.11 * x).cos()]);
         }
         let ranges = legacy_dense_ranges(0, 8 * LEGACY_TAIL_FACTOR as i128);
         scanner.strict_cache.reset(ranges[0].0, ranges[0].1);
@@ -4454,13 +4354,11 @@ mod tests {
         scanner.process_dense_region(start_cell, end_cell, 0, 1.0, &mut heap);
 
         assert_eq!(
-            scanner.diagnostics.dense_intermediate_cells,
-            DENSE_CHILD_CELLS as u64,
+            scanner.diagnostics.dense_intermediate_cells, DENSE_CHILD_CELLS as u64,
             "forcing fixture must keep every dense child alive through the 8x level",
         );
         assert_eq!(
-            scanner.diagnostics.dense_complete_regions,
-            1,
+            scanner.diagnostics.dense_complete_regions, 1,
             "forcing fixture must enter the complete Legacy64 dense fallback",
         );
         assert!(
@@ -4496,8 +4394,7 @@ mod tests {
             "forcing fixture must enter HQ intermediate dense execution",
         );
         assert_eq!(
-            scanner.diagnostics.dense_complete_regions,
-            0,
+            scanner.diagnostics.dense_complete_regions, 0,
             "complete dense reconstruction is a Legacy64-only execution path",
         );
         assert!(
@@ -4525,12 +4422,18 @@ mod tests {
                 samples[frame * channels + 2] = 0.61 * (1.31 * x).cos();
             }
             assert!(
-                samples.chunks_exact(channels).map(|frame| frame[0].abs()).fold(0.0, f64::max)
+                samples
+                    .chunks_exact(channels)
+                    .map(|frame| frame[0].abs())
+                    .fold(0.0, f64::max)
                     > 0.9,
                 "packed-prefix fixture lost its hot channel",
             );
             assert!(
-                samples.chunks_exact(channels).map(|frame| frame[1].abs()).fold(0.0, f64::max)
+                samples
+                    .chunks_exact(channels)
+                    .map(|frame| frame[1].abs())
+                    .fold(0.0, f64::max)
                     < 1.0e-10,
                 "packed-prefix fixture lost its very quiet partner",
             );
@@ -4538,13 +4441,20 @@ mod tests {
             let mut engine = QualifiedHalfDelayFft::new(reconstruction, channels);
             let mut observed = Vec::<(i128, Vec<f64>, Vec<f64>)>::new();
             for (frame_index, frame) in samples.chunks_exact(channels).enumerate() {
-                engine.process_frame(frame, frame_index as i128, |base, _, _, half, half_error| {
-                    observed.push((base + 1, half.to_vec(), half_error.to_vec()));
-                });
+                engine.process_frame(
+                    frame,
+                    frame_index as i128,
+                    |base, _, _, half, half_error| {
+                        observed.push((base + 1, half.to_vec(), half_error.to_vec()));
+                    },
+                );
             }
-            assert!(engine.flush(|base, _, _, half, half_error| {
-                observed.push((base + 1, half.to_vec(), half_error.to_vec()));
-            }), "fixture must exercise the final partial qualified-prefix block");
+            assert!(
+                engine.flush(|base, _, _, half, half_error| {
+                    observed.push((base + 1, half.to_vec(), half_error.to_vec()));
+                }),
+                "fixture must exercise the final partial qualified-prefix block"
+            );
             assert_eq!(observed.len(), frames);
 
             let mut sampled = 0usize;
@@ -4560,10 +4470,14 @@ mod tests {
                     continue;
                 }
                 sampled += 1;
-                assert_eq!(error[0].to_bits(), error[1].to_bits(),
-                    "a packed hot/quiet pair must share the same block enclosure");
+                assert_eq!(
+                    error[0].to_bits(),
+                    error[1].to_bits(),
+                    "a packed hot/quiet pair must share the same block enclosure"
+                );
                 for channel in 0..channels {
-                    let source_center = (coarse_index - 1).div_euclid(2) + spec.group_delay_inputs();
+                    let source_center =
+                        (coarse_index - 1).div_euclid(2) + spec.group_delay_inputs();
                     let mut direct = 0.0_f64;
                     for tap in 0..spec.first_taps {
                         let source = source_center - tap as i128;
@@ -4582,7 +4496,10 @@ mod tests {
                     );
                 }
             }
-            assert!(sampled > 100, "qualified-prefix fixture sampled too few points");
+            assert!(
+                sampled > 100,
+                "qualified-prefix fixture sampled too few points"
+            );
         }
     }
 
@@ -4600,7 +4517,11 @@ mod tests {
             samples[frame * channels + 1] = 1.0e-11 * (0.73 * x).cos();
         }
 
-        let packed_peak = samples.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+        let packed_peak = samples
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max);
         let injected_error = crate::qualified_prefix_coefficients::
             HQ1024_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER
             * packed_peak
@@ -4739,8 +4660,14 @@ mod tests {
                 hot_min < 0.0 && hot_max > 0.0 && hot_max - hot_min > 0.90,
                 "acceptance fixture must retain a wide zero-centered first-stage support range",
             );
-            let hot_peak = samples.chunks_exact(channels).map(|frame| frame[0].abs()).fold(0.0, f64::max);
-            let quiet_peak = samples.chunks_exact(channels).map(|frame| frame[1].abs()).fold(0.0, f64::max);
+            let hot_peak = samples
+                .chunks_exact(channels)
+                .map(|frame| frame[0].abs())
+                .fold(0.0, f64::max);
+            let quiet_peak = samples
+                .chunks_exact(channels)
+                .map(|frame| frame[1].abs())
+                .fold(0.0, f64::max);
             assert!(hot_peak > 0.7 && quiet_peak > 0.0 && quiet_peak < hot_peak * 1.0e-10);
 
             for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
@@ -4755,10 +4682,14 @@ mod tests {
                 assert!(certificate.diagnostics.authoritative_coarse_values >= 8_193 * channels as u64,
                     "fixture must process at least one complete canonical tile through the qualified 2x authority layer");
                 assert!(certificate.diagnostics.authoritative_coarse_groups > 0);
-                assert!(certificate.diagnostics.accelerated_l1_groups_tested > 0,
-                    "Fast90 fixture must exercise the cheap L1 root authority screen");
-                assert!(certificate.diagnostics.accelerated_l1_groups_rejected > 0,
-                    "the deliberately quiet packed partner must be rejected by the L1 root screen");
+                assert!(
+                    certificate.diagnostics.accelerated_l1_groups_tested > 0,
+                    "Fast90 fixture must exercise the cheap L1 root authority screen"
+                );
+                assert!(
+                    certificate.diagnostics.accelerated_l1_groups_rejected > 0,
+                    "the deliberately quiet packed partner must be rejected by the L1 root screen"
+                );
                 assert!(certificate.diagnostics.accelerated_curvature_roots
                     < certificate.diagnostics.accelerated_l1_groups_tested,
                     "Fast90 must avoid constructing curvature summaries for at least the quiet-channel roots");
@@ -4810,8 +4741,7 @@ mod tests {
             "mono fixture must process a complete tile through qualified 2x authority",
         );
         assert_eq!(
-            mono_certificate.diagnostics.strict_coarse_evaluations,
-            0,
+            mono_certificate.diagnostics.strict_coarse_evaluations, 0,
             "normal mono Fast90 must not fall back to direct first-stage reconstruction",
         );
     }
@@ -4864,9 +4794,11 @@ mod tests {
                                 f64::from_bits(1 + (frame as u64 & 7))
                             }
                         }
-                        _ => (f64::MAX / 4.0)
-                            * (0.70 + 0.03 * channel as f64)
-                            * ((0.43 + channel as f64 * 0.19) * x).sin(),
+                        _ => {
+                            (f64::MAX / 4.0)
+                                * (0.70 + 0.03 * channel as f64)
+                                * ((0.43 + channel as f64 * 0.19) * x).sin()
+                        }
                     };
                 }
             }
@@ -4878,7 +4810,10 @@ mod tests {
             };
             match shape {
                 0 => {
-                    assert!(channel_peak(0) > 0.9, "hot/silence fixture lost its hot channel");
+                    assert!(
+                        channel_peak(0) > 0.9,
+                        "hot/silence fixture lost its hot channel"
+                    );
                     assert_eq!(
                         channel_peak(1),
                         0.0,
@@ -4964,7 +4899,10 @@ mod tests {
             -f64::from_bits(11),
             f64::from_bits(5),
         ];
-        for reconstruction in [ReconstructionId::LegacyHeadroom64, ReconstructionId::Hq1024V1] {
+        for reconstruction in [
+            ReconstructionId::LegacyHeadroom64,
+            ReconstructionId::Hq1024V1,
+        ] {
             for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
                 let exact = exhaustive_peak(reconstruction, &samples, 1, edge);
                 let certificate = scan_with_chunks(
@@ -5121,7 +5059,8 @@ mod tests {
     }
 
     #[test]
-    fn hq_reference_is_cross_checked_against_legacy_direct_oracle_on_analytical_intersample_carrier() {
+    fn hq_reference_is_cross_checked_against_legacy_direct_oracle_on_analytical_intersample_carrier(
+    ) {
         // Exact reviewer_three_tone construction from the retained Legacy64
         // qualification. For every real time t, each cosine is <= 1, so the
         // continuous waveform is <= 3/6 = 0.5 and reaches that bound exactly
@@ -5138,9 +5077,7 @@ mod tests {
                 frequencies
                     .iter()
                     .copied()
-                    .map(|frequency| {
-                        (2.0 * std::f64::consts::PI * frequency * relative).cos()
-                    })
+                    .map(|frequency| (2.0 * std::f64::consts::PI * frequency * relative).cos())
                     .sum::<f64>()
                     / 6.0
             })
@@ -5177,12 +5114,11 @@ mod tests {
         // HQ merely to remain inside the Legacy analytical envelope is a
         // conservative detector for gross/self-consistent coefficient errors.
         const LEGACY_QUALIFIED_ABS_ERROR_DB: f64 = 0.050;
-        let legacy_error_db =
-            positive_finite_linear_to_dbtp(legacy_point / analytical_peak).abs();
+        let legacy_error_db = positive_finite_linear_to_dbtp(legacy_point / analytical_peak).abs();
         let hq_error_db = positive_finite_linear_to_dbtp(hq_point / analytical_peak).abs();
-        let cross_error_db =
-            (positive_finite_linear_to_dbtp(hq_point) - positive_finite_linear_to_dbtp(legacy_point))
-                .abs();
+        let cross_error_db = (positive_finite_linear_to_dbtp(hq_point)
+            - positive_finite_linear_to_dbtp(legacy_point))
+        .abs();
         assert!(
             legacy_error_db <= LEGACY_QUALIFIED_ABS_ERROR_DB,
             "Legacy64 direct oracle left its qualified analytical envelope: {legacy_error_db:.9} dB",
@@ -5214,7 +5150,10 @@ mod tests {
             });
         }
 
-        for reconstruction in [ReconstructionId::LegacyHeadroom64, ReconstructionId::Hq1024V1] {
+        for reconstruction in [
+            ReconstructionId::LegacyHeadroom64,
+            ReconstructionId::Hq1024V1,
+        ] {
             for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
                 let exact = exhaustive_peak(reconstruction, &samples, channels, edge);
                 let mut meter = CertifiedPeakMeterImpl::new(
@@ -5284,7 +5223,10 @@ mod tests {
         // tie-heavy signal that exposed non-canonical candidate/frontier state.
         // Keep full certificate equality, including deterministic diagnostics.
         let samples = vec![0.75_f64; 38];
-        for reconstruction in [ReconstructionId::Hq1024V1, ReconstructionId::LegacyHeadroom64] {
+        for reconstruction in [
+            ReconstructionId::Hq1024V1,
+            ReconstructionId::LegacyHeadroom64,
+        ] {
             for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
                 let whole = scan_with_chunks(
                     reconstruction,
@@ -5319,8 +5261,14 @@ mod tests {
                     &[5, 1, 17, 3, 12],
                 );
                 assert_eq!(whole, one, "{reconstruction:?} {edge:?}: whole vs 1-frame");
-                assert_eq!(whole, thirty_seven, "{reconstruction:?} {edge:?}: whole vs 37-frame");
-                assert_eq!(whole, irregular, "{reconstruction:?} {edge:?}: whole vs irregular");
+                assert_eq!(
+                    whole, thirty_seven,
+                    "{reconstruction:?} {edge:?}: whole vs 37-frame"
+                );
+                assert_eq!(
+                    whole, irregular,
+                    "{reconstruction:?} {edge:?}: whole vs irregular"
+                );
                 assert_eq!(whole.status, SearchStatus::Complete);
                 let exact = exhaustive_peak(reconstruction, &samples, 1, edge);
                 assert!(whole.finite_interval.lower_linear <= exact);
@@ -5332,16 +5280,17 @@ mod tests {
     #[test]
     fn endpoint_winners_use_real_track_edges_during_rescore() {
         let samples = [1.0_f64, -0.93, 0.21, -0.17, 0.91, -0.99];
-        for reconstruction in [ReconstructionId::LegacyHeadroom64, ReconstructionId::Hq1024V1] {
+        for reconstruction in [
+            ReconstructionId::LegacyHeadroom64,
+            ReconstructionId::Hq1024V1,
+        ] {
             for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
                 let spec = ReconstructionSpec::for_id(reconstruction);
                 let mut scanner = CertifiedScanner::new(spec, SearchPolicy::Reference9, 1);
                 let frames = samples.len() as i128;
                 for frame in -spec.input_halo_frames..frames + spec.input_halo_frames {
-                    scanner.observe_raw_frame(
-                        frame,
-                        &[extended_sample(&samples, 1, frame, 0, edge)],
-                    );
+                    scanner
+                        .observe_raw_frame(frame, &[extended_sample(&samples, 1, frame, 0, edge)]);
                 }
 
                 let tail = spec.tail();
@@ -5357,14 +5306,8 @@ mod tests {
                 ];
                 let mut expected_upper = 0.0_f64;
                 for location in locations {
-                    let oracle = direct_target_value(
-                        reconstruction,
-                        &samples,
-                        1,
-                        edge,
-                        location,
-                        0,
-                    );
+                    let oracle =
+                        direct_target_value(reconstruction, &samples, 1, edge, location, 0);
                     let accurate = scanner.accurate_target_evaluation(location, 0);
                     assert!(
                         accurate.lower() <= oracle.abs() && accurate.upper() >= oracle.abs(),
@@ -5393,7 +5336,8 @@ mod tests {
 
     #[test]
     fn rescore_frontier_equal_upper_retention_is_canonical() {
-        fn run(order: impl IntoIterator<Item = usize>) -> (Vec<(i128, usize)>, Vec<(i128, usize)>) {
+        type Retained = Vec<(i128, usize)>;
+        fn run(order: impl IntoIterator<Item = usize>) -> (Retained, Retained) {
             let mut frontier = TileEvaluationFrontier::default();
             let mut immediate = Vec::new();
             for index in order {
@@ -5518,13 +5462,11 @@ mod tests {
             total,
             "a full frontier must return, not discard, every still-live competitor",
         );
-        assert!(
-            frontier
-                .retained
-                .iter()
-                .chain(immediate.iter())
-                .all(|tracked| tracked.evaluation.upper() > 0.5),
-        );
+        assert!(frontier
+            .retained
+            .iter()
+            .chain(immediate.iter())
+            .all(|tracked| tracked.evaluation.upper() > 0.5),);
     }
 
     #[test]
@@ -5539,7 +5481,10 @@ mod tests {
         .unwrap();
         meter.push_interleaved(&[0.25, -0.5, 0.125]).unwrap();
         meter.scanner.unresolved_upper_channel_peaks[0] = 2.0;
-        assert_eq!(meter.finalize(), Err(TruePeakError::ReferenceSearchIncomplete));
+        assert_eq!(
+            meter.finalize(),
+            Err(TruePeakError::ReferenceSearchIncomplete)
+        );
     }
 
     #[test]
@@ -5569,8 +5514,7 @@ mod tests {
         );
         assert_eq!(certificate.diagnostics.phase_evaluations, 0);
         assert_eq!(
-            certificate.diagnostics.direct_rescore_evaluations,
-            0,
+            certificate.diagnostics.direct_rescore_evaluations, 0,
             "Fast90 must not spend unbudgeted strict-rescore work",
         );
     }
@@ -5578,12 +5522,8 @@ mod tests {
     #[test]
     fn fast_tile_fallback_is_local_to_the_skipped_tile_support() {
         let spec = ReconstructionSpec::for_id(ReconstructionId::Hq1024V1);
-        let mut scanner = CertifiedScanner::new_at_rate(
-            spec,
-            SearchPolicy::RetiredClockFast1s,
-            1,
-            192_000,
-        );
+        let mut scanner =
+            CertifiedScanner::new_at_rate(spec, SearchPolicy::RetiredClockFast1s, 1, 192_000);
         let coarse_start = 512_i128;
         let coarse_end = 640_i128;
         let tail = spec.tail();
@@ -5604,19 +5544,18 @@ mod tests {
 
         let local = upper_mul(0.2, HQ1024V1_RECONSTRUCTION_LINF_GAIN_UPPER);
         let whole_buffer = upper_mul(0.9, HQ1024V1_RECONSTRUCTION_LINF_GAIN_UPPER);
-        assert_eq!(scanner.unresolved_upper_channel_peaks[0].to_bits(), local.to_bits());
+        assert_eq!(
+            scanner.unresolved_upper_channel_peaks[0].to_bits(),
+            local.to_bits()
+        );
         assert!(scanner.unresolved_upper_channel_peaks[0] < whole_buffer);
     }
 
     #[test]
     fn fast_partial_candidate_deadline_preserves_completed_channel_root() {
         let spec = ReconstructionSpec::for_id(ReconstructionId::Hq1024V1);
-        let mut scanner = CertifiedScanner::new_at_rate(
-            spec,
-            SearchPolicy::RetiredClockFast1s,
-            2,
-            192_000,
-        );
+        let mut scanner =
+            CertifiedScanner::new_at_rate(spec, SearchPolicy::RetiredClockFast1s, 2, 192_000);
         let coarse_start = 512_i128;
         let coarse_end = 640_i128;
         let (raw_start, raw_end) = scanner.tile_raw_support(coarse_start, coarse_end);
@@ -5632,7 +5571,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(scanner.unresolved_upper_channel_peaks[0].to_bits(), completed_root.to_bits());
+        assert_eq!(
+            scanner.unresolved_upper_channel_peaks[0].to_bits(),
+            completed_root.to_bits()
+        );
         assert!(
             scanner.unresolved_upper_channel_peaks[0]
                 < upper_mul(0.9, HQ1024V1_RECONSTRUCTION_LINF_GAIN_UPPER),
@@ -5648,12 +5590,8 @@ mod tests {
     #[test]
     fn fast_internal_allowance_scales_with_programme_frames_plus_bounded_startup_burst() {
         let spec = ReconstructionSpec::for_id(ReconstructionId::Hq1024V1);
-        let mut scanner = CertifiedScanner::new_at_rate(
-            spec,
-            SearchPolicy::RetiredClockFast1s,
-            1,
-            192_000,
-        );
+        let mut scanner =
+            CertifiedScanner::new_at_rate(spec, SearchPolicy::RetiredClockFast1s, 1, 192_000);
         scanner.nominal_frames_seen = 192_000 * 60;
         assert_eq!(scanner.fast_allowed_processing_nanos(), 950_000_000);
         scanner.nominal_frames_seen = 192_000 * 120;
@@ -5691,12 +5629,15 @@ mod tests {
                 > certificate.finite_interval.lower_linear,
         );
         assert_eq!(certificate.diagnostics.direct_rescore_evaluations, 0);
-        let sample_peak = samples.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+        let sample_peak = samples
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max);
         assert!(
             certificate.finite_interval.upper_linear
                 >= upper_mul(sample_peak, HQ1024V1_RECONSTRUCTION_LINF_GAIN_UPPER),
             "skipping Fast tile work must attach the tile-local HQ L-infinity fallback",
         );
     }
-
 }

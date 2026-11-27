@@ -46,12 +46,16 @@ pub enum ReplayGainError {
 impl fmt::Display for ReplayGainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NonFiniteLoudness => f.write_str("ReplayGain requires finite integrated loudness"),
+            Self::NonFiniteLoudness => {
+                f.write_str("ReplayGain requires finite integrated loudness")
+            }
             Self::InvalidPeak => f.write_str("ReplayGain peak must be finite and nonnegative"),
             Self::InvalidReference => f.write_str("ReplayGain reference must be finite"),
             Self::InvalidCeiling => f.write_str("ReplayGain prevention ceiling must be finite"),
             Self::NumericalRange => f.write_str("ReplayGain arithmetic exceeded finite range"),
-            Self::Q78OutOfRange => f.write_str("Opus R128 Q7.8 gain is outside signed 16-bit range"),
+            Self::Q78OutOfRange => {
+                f.write_str("Opus R128 Q7.8 gain is outside signed 16-bit range")
+            }
         }
     }
 }
@@ -235,7 +239,10 @@ mod tests {
         .unwrap();
         assert!(!result.limited);
         assert_eq!(result.applied_gain_db, 0.0);
-        assert_eq!(result.resulting_peak_linear.to_bits(), ceiling_linear.to_bits());
+        assert_eq!(
+            result.resulting_peak_linear.to_bits(),
+            ceiling_linear.to_bits()
+        );
     }
 
     #[test]
@@ -254,7 +261,10 @@ mod tests {
             calculate_replaygain(
                 -18.0,
                 0.5,
-                ReplayGainOptions { reference_lufs: f64::INFINITY, prevention_ceiling_dbtp: None },
+                ReplayGainOptions {
+                    reference_lufs: f64::INFINITY,
+                    prevention_ceiling_dbtp: None
+                },
             ),
             Err(ReplayGainError::InvalidReference),
         );
@@ -262,7 +272,10 @@ mod tests {
             calculate_replaygain(
                 -18.0,
                 0.5,
-                ReplayGainOptions { reference_lufs: -18.0, prevention_ceiling_dbtp: Some(f64::NAN) },
+                ReplayGainOptions {
+                    reference_lufs: -18.0,
+                    prevention_ceiling_dbtp: Some(f64::NAN)
+                },
             ),
             Err(ReplayGainError::InvalidCeiling),
         );
@@ -279,8 +292,14 @@ mod tests {
 
     #[test]
     fn q78_accepts_signed_range_and_rejects_rounding_past_it() {
-        assert_eq!(gain_db_to_opus_q78(f64::from(i16::MAX) / 256.0).unwrap(), i16::MAX);
-        assert_eq!(gain_db_to_opus_q78(f64::from(i16::MIN) / 256.0).unwrap(), i16::MIN);
+        assert_eq!(
+            gain_db_to_opus_q78(f64::from(i16::MAX) / 256.0).unwrap(),
+            i16::MAX
+        );
+        assert_eq!(
+            gain_db_to_opus_q78(f64::from(i16::MIN) / 256.0).unwrap(),
+            i16::MIN
+        );
         assert_eq!(
             gain_db_to_opus_q78((f64::from(i16::MAX) + 0.5) / 256.0),
             Err(ReplayGainError::Q78OutOfRange),
@@ -290,5 +309,4 @@ mod tests {
             Err(ReplayGainError::Q78OutOfRange),
         );
     }
-
 }

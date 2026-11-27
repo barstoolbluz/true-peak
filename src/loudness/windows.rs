@@ -27,28 +27,26 @@ impl WindowClock {
         if rate == 0 {
             return Err(LoudnessError::InvalidSampleRate);
         }
-        let legacy_hop_frames = rate
-            .checked_add(5)
-            .ok_or(LoudnessError::InputTooLong)?
-            / 10;
+        let legacy_hop_frames = rate.checked_add(5).ok_or(LoudnessError::InputTooLong)? / 10;
         let integrated_window_frames = match profile {
             LoudnessProfile::Libebur128126 => legacy_hop_frames
                 .checked_mul(4)
                 .ok_or(LoudnessError::InputTooLong)?,
             // nearest integer to 0.4 * Fs; 2*Fs/5 can never be exactly x.5.
-            LoudnessProfile::NativeEbu2023 => rate
-                .checked_mul(2)
-                .and_then(|value| value.checked_add(2))
-                .ok_or(LoudnessError::InputTooLong)?
-                / 5,
+            LoudnessProfile::NativeEbu2023 => {
+                rate.checked_mul(2)
+                    .and_then(|value| value.checked_add(2))
+                    .ok_or(LoudnessError::InputTooLong)?
+                    / 5
+            }
         };
         let lra_window_frames = match profile {
             LoudnessProfile::Libebur128126 => legacy_hop_frames
                 .checked_mul(30)
                 .ok_or(LoudnessError::InputTooLong)?,
-            LoudnessProfile::NativeEbu2023 => rate
-                .checked_mul(3)
-                .ok_or(LoudnessError::InputTooLong)?,
+            LoudnessProfile::NativeEbu2023 => {
+                rate.checked_mul(3).ok_or(LoudnessError::InputTooLong)?
+            }
         };
         let ring_frames = match profile {
             LoudnessProfile::Libebur128126 => {
@@ -226,7 +224,12 @@ impl WindowClock {
             0
         };
         let lra = if include_lra {
-            self.count_events(target_frames, self.next_lra_index, self.lra_window_frames, true)?
+            self.count_events(
+                target_frames,
+                self.next_lra_index,
+                self.lra_window_frames,
+                true,
+            )?
         } else {
             0
         };
@@ -292,7 +295,6 @@ mod tests {
         assert_eq!(clock.next_lra_end().unwrap(), 192_000);
     }
 
-
     #[test]
     fn legacy_odd_rate_ring_rounds_up_without_changing_lra_window() {
         let mut clock = WindowClock::new(44_101, LoudnessProfile::Libebur128126).unwrap();
@@ -318,15 +320,24 @@ mod tests {
     #[test]
     fn event_preflight_counts_match_due_events() {
         let clock = WindowClock::new(48_000, LoudnessProfile::Libebur128126).unwrap();
-        assert_eq!(clock.events_due_through(240_000, true, true).unwrap(), (47, 3));
+        assert_eq!(
+            clock.events_due_through(240_000, true, true).unwrap(),
+            (47, 3)
+        );
         let native = WindowClock::new(44_101, LoudnessProfile::NativeEbu2023).unwrap();
         let end = 44_101 * 10;
-        assert_eq!(native.events_due_through(end, true, true).unwrap(), (97, 71));
+        assert_eq!(
+            native.events_due_through(end, true, true).unwrap(),
+            (97, 71)
+        );
     }
     #[test]
     fn required_integrated_and_lra_boundary_matrix_is_exact() {
         const H: u64 = 4_800;
-        for profile in [LoudnessProfile::Libebur128126, LoudnessProfile::NativeEbu2023] {
+        for profile in [
+            LoudnessProfile::Libebur128126,
+            LoudnessProfile::NativeEbu2023,
+        ] {
             let clock = WindowClock::new(48_000, profile).unwrap();
             for (frames, expected) in [
                 (4 * H - 1, 0),
@@ -335,7 +346,11 @@ mod tests {
                 (5 * H, 2),
                 (5 * H + H / 2, 2),
             ] {
-                assert_eq!(clock.events_due_through(frames, true, false).unwrap().0, expected, "{profile:?} integrated at {frames}");
+                assert_eq!(
+                    clock.events_due_through(frames, true, false).unwrap().0,
+                    expected,
+                    "{profile:?} integrated at {frames}"
+                );
             }
         }
 
@@ -347,7 +362,11 @@ mod tests {
             (187_200, 1),
             (192_000, 2),
         ] {
-            assert_eq!(legacy.events_due_through(frames, false, true).unwrap().1, expected, "legacy LRA at {frames}");
+            assert_eq!(
+                legacy.events_due_through(frames, false, true).unwrap().1,
+                expected,
+                "legacy LRA at {frames}"
+            );
         }
 
         let native = WindowClock::new(48_000, LoudnessProfile::NativeEbu2023).unwrap();
@@ -358,7 +377,11 @@ mod tests {
             (187_200, 10),
             (192_000, 11),
         ] {
-            assert_eq!(native.events_due_through(frames, false, true).unwrap().1, expected, "native LRA at {frames}");
+            assert_eq!(
+                native.events_due_through(frames, false, true).unwrap().1,
+                expected,
+                "native LRA at {frames}"
+            );
         }
     }
 
@@ -391,7 +414,10 @@ mod tests {
     #[test]
     fn perf09_cached_deadline_sequences_match_the_original_checked_formulas() {
         for rate in [16_u32, 32_000, 44_100, 44_101, 48_000, 192_000, 2_822_400] {
-            for profile in [LoudnessProfile::NativeEbu2023, LoudnessProfile::Libebur128126] {
+            for profile in [
+                LoudnessProfile::NativeEbu2023,
+                LoudnessProfile::Libebur128126,
+            ] {
                 let mut integrated = WindowClock::new(rate, profile).unwrap();
                 for _ in 0..257 {
                     let expected = integrated.calculate_integrated_end().unwrap();
@@ -427,7 +453,10 @@ mod tests {
         assert!(clock.take_integrated_if_due(deadline).unwrap());
         // Taking the last representable event succeeds. Only the next query
         // asks for the successor and therefore observes its checked overflow.
-        assert_eq!(clock.next_integrated_end(), Err(LoudnessError::InputTooLong));
+        assert_eq!(
+            clock.next_integrated_end(),
+            Err(LoudnessError::InputTooLong)
+        );
     }
 
     #[test]
@@ -446,23 +475,127 @@ mod tests {
     #[test]
     fn qualified_clock_boundary_matrix_is_exact() {
         let fixtures = [
-            (32_000, LoudnessProfile::Libebur128126, 12_800, 16_000, 96_000, 128_000, 96_000),
-            (44_100, LoudnessProfile::Libebur128126, 17_640, 22_050, 132_300, 176_400, 132_300),
-            (44_101, LoudnessProfile::Libebur128126, 17_640, 22_050, 132_300, 176_400, 136_710),
-            (48_000, LoudnessProfile::Libebur128126, 19_200, 24_000, 144_000, 192_000, 144_000),
-            (96_000, LoudnessProfile::Libebur128126, 38_400, 48_000, 288_000, 384_000, 288_000),
-            (192_000, LoudnessProfile::Libebur128126, 76_800, 96_000, 576_000, 768_000, 576_000),
-            (32_000, LoudnessProfile::NativeEbu2023, 12_800, 16_000, 96_000, 99_200, 96_000),
-            (44_100, LoudnessProfile::NativeEbu2023, 17_640, 22_050, 132_300, 136_710, 132_300),
-            (44_101, LoudnessProfile::NativeEbu2023, 17_640, 22_050, 132_303, 136_713, 132_303),
-            (48_000, LoudnessProfile::NativeEbu2023, 19_200, 24_000, 144_000, 148_800, 144_000),
-            (96_000, LoudnessProfile::NativeEbu2023, 38_400, 48_000, 288_000, 297_600, 288_000),
-            (192_000, LoudnessProfile::NativeEbu2023, 76_800, 96_000, 576_000, 595_200, 576_000),
+            (
+                32_000,
+                LoudnessProfile::Libebur128126,
+                12_800,
+                16_000,
+                96_000,
+                128_000,
+                96_000,
+            ),
+            (
+                44_100,
+                LoudnessProfile::Libebur128126,
+                17_640,
+                22_050,
+                132_300,
+                176_400,
+                132_300,
+            ),
+            (
+                44_101,
+                LoudnessProfile::Libebur128126,
+                17_640,
+                22_050,
+                132_300,
+                176_400,
+                136_710,
+            ),
+            (
+                48_000,
+                LoudnessProfile::Libebur128126,
+                19_200,
+                24_000,
+                144_000,
+                192_000,
+                144_000,
+            ),
+            (
+                96_000,
+                LoudnessProfile::Libebur128126,
+                38_400,
+                48_000,
+                288_000,
+                384_000,
+                288_000,
+            ),
+            (
+                192_000,
+                LoudnessProfile::Libebur128126,
+                76_800,
+                96_000,
+                576_000,
+                768_000,
+                576_000,
+            ),
+            (
+                32_000,
+                LoudnessProfile::NativeEbu2023,
+                12_800,
+                16_000,
+                96_000,
+                99_200,
+                96_000,
+            ),
+            (
+                44_100,
+                LoudnessProfile::NativeEbu2023,
+                17_640,
+                22_050,
+                132_300,
+                136_710,
+                132_300,
+            ),
+            (
+                44_101,
+                LoudnessProfile::NativeEbu2023,
+                17_640,
+                22_050,
+                132_303,
+                136_713,
+                132_303,
+            ),
+            (
+                48_000,
+                LoudnessProfile::NativeEbu2023,
+                19_200,
+                24_000,
+                144_000,
+                148_800,
+                144_000,
+            ),
+            (
+                96_000,
+                LoudnessProfile::NativeEbu2023,
+                38_400,
+                48_000,
+                288_000,
+                297_600,
+                288_000,
+            ),
+            (
+                192_000,
+                LoudnessProfile::NativeEbu2023,
+                76_800,
+                96_000,
+                576_000,
+                595_200,
+                576_000,
+            ),
         ];
         for (rate, profile, first_i, second_i, first_lra, second_lra, ring) in fixtures {
             let mut clock = WindowClock::new(rate, profile).unwrap();
-            assert_eq!(clock.integrated_window_frames(), first_i, "{rate} {profile:?} integrated window");
-            assert_eq!(clock.lra_window_frames(), first_lra, "{rate} {profile:?} LRA window");
+            assert_eq!(
+                clock.integrated_window_frames(),
+                first_i,
+                "{rate} {profile:?} integrated window"
+            );
+            assert_eq!(
+                clock.lra_window_frames(),
+                first_lra,
+                "{rate} {profile:?} LRA window"
+            );
             assert_eq!(clock.ring_frames(), ring, "{rate} {profile:?} ring");
             assert_eq!(clock.next_integrated_end().unwrap(), first_i);
             assert!(!clock.take_integrated_if_due(first_i - 1).unwrap());
@@ -474,5 +607,4 @@ mod tests {
             assert_eq!(clock.next_lra_end().unwrap(), second_lra);
         }
     }
-
 }

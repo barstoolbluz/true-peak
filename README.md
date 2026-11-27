@@ -257,6 +257,37 @@ All native full-meter constructors reject nonzero rates below 3,364 Hz with `Uns
 
 See `FULL-RANGE-REPORT.md` in this delivery for the extended mathematical reference and its limitations; `K-WEIGHTING-REPORT.md` records the preceding research. Native qualification remains mandatory before release.
 
+### Native full-meter energy cells
+
+The native full meter now retains compensated nonnegative per-channel energy
+cells on the union of the existing window-start and integrated-end grids.
+No outgoing energy is subtracted. Integrated and LRA observations use the
+original deadlines, channel weights, gate comparisons, percentile rules, and
+EOF continuation. Positive cell totals change addition grouping; old native
+results need not remain bitwise identical. The explicit libebur128 1.2.6
+compatibility path retains its filtered PCM ring and original arithmetic.
+
+The retained-buffer limit continues to account for actual allocated capacities
+and gated history. Native fixed buffers no longer grow with sample rate;
+smaller allocations may admit previously budget-rejected layouts. Integrated
+only uses a smaller cell queue and no LRA history or EOF continuation.
+`LoudnessRangeMeter::new` provides a dedicated native range-only consumer,
+without integrated observations/history, using exactly the full meter's LRA
+arithmetic. Audioscopy uses it for per-track and continuous album LRA; short-term
+state and filter remain separate. Native statistics use a scaled mean only if
+an otherwise finite positive observation history overflows its raw sum.
+
+Native regression and performance qualification passed in checkpoint 13 on an
+AMD Ryzen Threadripper 7970X (x86-64 Linux) and an Apple M4 (aarch64 macOS).
+
+### Optional AArch64 NEON K-weighting
+
+The `experimental-loudness-neon` feature enables native AArch64 NEON
+K-weighting. It is off by default. Default scalar/ISA selection and the
+compatibility profile are unchanged. It passed native qualification on an
+Apple M4 in checkpoint 13. No extended-precision true-peak or loudness path is
+claimed.
+
 ## Licence
 
 true-peak is free software: you can redistribute it and/or modify it under

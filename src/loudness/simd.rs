@@ -20,6 +20,8 @@ enum BackendKind {
     /// re-attestation; SSE2 remains production for two and three.
     #[cfg(target_arch = "x86_64")]
     Avx,
+    #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+    Neon,
 }
 
 impl Backend {
@@ -45,6 +47,10 @@ impl Backend {
                 return Self(BackendKind::Sse2);
             }
         }
+        #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+        if channels >= 2 {
+            return Self::neon_if_available().unwrap_or_else(Self::scalar);
+        }
         #[cfg(not(target_arch = "x86_64"))]
         let _ = channels;
         Self::scalar()
@@ -61,6 +67,8 @@ impl Backend {
             BackendKind::Sse2 => LoudnessSimdBackend::Sse2,
             #[cfg(target_arch = "x86_64")]
             BackendKind::Avx => LoudnessSimdBackend::Avx,
+            #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+            BackendKind::Neon => LoudnessSimdBackend::Neon,
         }
     }
 
@@ -74,7 +82,12 @@ impl Backend {
         std::is_x86_feature_detected!("avx").then_some(Self(BackendKind::Avx))
     }
 
-    #[cfg(test)]
+    #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+    pub(super) fn neon_if_available() -> Option<Self> {
+        std::arch::is_aarch64_feature_detected!("neon").then_some(Self(BackendKind::Neon))
+    }
+
+    #[cfg(all(test, target_arch = "x86_64"))]
     pub(super) fn best_available() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
@@ -107,6 +120,8 @@ pub(super) fn filter_frame(
 
     match backend.0 {
         BackendKind::Scalar => filter_frame_scalar(frame, filters, coefficients, output),
+        #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+        BackendKind::Neon => filter_frame_scalar(frame, filters, coefficients, output),
         #[cfg(target_arch = "x86_64")]
         BackendKind::Sse2 => {
             // SAFETY: BackendKind::Sse2 is only constructed after the one-time
@@ -300,6 +315,8 @@ pub(super) fn window_channel_sums(
 
     match backend.0 {
         BackendKind::Scalar => window_channel_sums_scalar(ring, channels, weights, spans, sums),
+        #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+        BackendKind::Neon => window_channel_sums_scalar(ring, channels, weights, spans, sums),
         #[cfg(target_arch = "x86_64")]
         BackendKind::Sse2 => {
             // SAFETY: selection performed the one-time feature check. Only real
@@ -363,6 +380,7 @@ unsafe fn accumulate_window_pair(
     sums[c1] = values[1];
 }
 
+#[cfg(target_arch = "x86_64")]
 fn accumulate_window_scalar(
     ring: &[f64],
     channels: usize,
@@ -464,7 +482,7 @@ unsafe fn window_channel_sums_avx(
 }
 
 // Same arithmetic graph as fidelity::State::process, including exact-zero
-// excitation and tiny homogeneous-tail clearing. No FMA or new ISA coverage.
+// excitation and tiny homogeneous-tail clearing. No FMA.
 pub(super) fn filter_fidelity_frame(
     backend: Backend,
     frame: &[f64],
@@ -482,6 +500,11 @@ pub(super) fn filter_fidelity_frame(
         BackendKind::Sse2 => unsafe { fidelity_sse2(frame, states, coefficients, output, 0) },
         #[cfg(target_arch = "x86_64")]
         BackendKind::Avx => unsafe { fidelity_avx(frame, states, coefficients, output, 0) },
+        #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+        BackendKind::Neon => {
+            // SAFETY: private dispatch checked NEON; geometry checked above.
+            unsafe { neon_experiment::conditioned_neon(frame, states, coefficients, output) }
+        }
     }
 }
 
@@ -561,7 +584,10 @@ macro_rules! fidelity_kernel {
                 let mut qn = $add(q, $mul(cs, y));
                 let unexcited = $eq(dx, zero);
                 if $movemask(unexcited) != 0 {
-                    let clear = $and(unexcited, $and($lt($andnot(sign, yn), tiny), $lt($andnot(sign, qn), tiny)));
+                    let clear = $and(
+                        unexcited,
+                        $and($lt($andnot(sign, yn), tiny), $lt($andnot(sign, qn), tiny)),
+                    );
                     yn = $andnot(clear, yn);
                     qn = $andnot(clear, qn);
                 }
@@ -573,7 +599,10 @@ macro_rules! fidelity_kernel {
                 let mut bn = $add(b, $mul(k2, bp));
                 let unexcited = $eq(yn, zero);
                 if $movemask(unexcited) != 0 {
-                    let clear = $and(unexcited, $and($lt($andnot(sign, an), tiny), $lt($andnot(sign, bn), tiny)));
+                    let clear = $and(
+                        unexcited,
+                        $and($lt($andnot(sign, an), tiny), $lt($andnot(sign, bn), tiny)),
+                    );
                     an = $andnot(clear, an);
                     bn = $andnot(clear, bn);
                     out = $andnot(clear, out);
@@ -594,8 +623,45 @@ macro_rules! fidelity_kernel {
 }
 
 #[cfg(target_arch = "x86_64")]
-fidelity_kernel!(fidelity_sse2, "sse2", 2, _mm_set1_pd, _mm_loadu_pd, _mm_storeu_pd,
-    _mm_add_pd, _mm_sub_pd, _mm_mul_pd, _mm_and_pd, _mm_andnot_pd, _mm_cmpeq_pd, _mm_cmplt_pd, _mm_movemask_pd, fidelity_scalar);
+fidelity_kernel!(
+    fidelity_sse2,
+    "sse2",
+    2,
+    _mm_set1_pd,
+    _mm_loadu_pd,
+    _mm_storeu_pd,
+    _mm_add_pd,
+    _mm_sub_pd,
+    _mm_mul_pd,
+    _mm_and_pd,
+    _mm_andnot_pd,
+    _mm_cmpeq_pd,
+    _mm_cmplt_pd,
+    _mm_movemask_pd,
+    fidelity_scalar
+);
 #[cfg(target_arch = "x86_64")]
-fidelity_kernel!(fidelity_avx, "avx", 4, _mm256_set1_pd, _mm256_loadu_pd, _mm256_storeu_pd,
-    _mm256_add_pd, _mm256_sub_pd, _mm256_mul_pd, _mm256_and_pd, _mm256_andnot_pd, fidelity_avx_eq, fidelity_avx_lt, _mm256_movemask_pd, fidelity_sse2);
+fidelity_kernel!(
+    fidelity_avx,
+    "avx",
+    4,
+    _mm256_set1_pd,
+    _mm256_loadu_pd,
+    _mm256_storeu_pd,
+    _mm256_add_pd,
+    _mm256_sub_pd,
+    _mm256_mul_pd,
+    _mm256_and_pd,
+    _mm256_andnot_pd,
+    fidelity_avx_eq,
+    fidelity_avx_lt,
+    _mm256_movemask_pd,
+    fidelity_sse2
+);
+
+#[cfg(all(
+    target_arch = "aarch64",
+    any(test, feature = "experimental-loudness-neon")
+))]
+#[path = "neon_experiment.rs"]
+mod neon_experiment;

@@ -11,9 +11,7 @@
 use std::env;
 use std::time::Instant;
 
-use true_peak::loudness::{
-    ChannelRole, LoudnessMeter, LoudnessProfile, LoudnessSimdBackend,
-};
+use true_peak::loudness::{ChannelRole, LoudnessMeter, LoudnessProfile, LoudnessSimdBackend};
 
 fn roles(channels: usize) -> Result<Vec<ChannelRole>, String> {
     use ChannelRole::*;
@@ -82,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(5)
         .map(|v| v.parse())
         .transpose()?
-        .unwrap_or(0x5EED_2026_09_19);
+        .unwrap_or(0x5EED_2026_0919);
 
     let roles = roles(channels)?;
     let mut meter = LoudnessMeter::with_roles(sample_rate, &roles, LoudnessProfile::NativeEbu2023)?;

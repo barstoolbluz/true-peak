@@ -13,9 +13,7 @@ use std::hint::black_box;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
-use true_peak::loudness::{
-    ChannelRole, LoudnessMeter, LoudnessMetricDemand, LoudnessProfile,
-};
+use true_peak::loudness::{ChannelRole, LoudnessMeter, LoudnessMetricDemand, LoudnessProfile};
 use true_peak::ReportingPeakMeter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,7 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let frames = before.len() / frame_bytes as u64;
     let n_per_chunk = 16_384usize.checked_mul(channels).ok_or("chunk overflow")?;
-    let chunk_bytes = 16_384usize.checked_mul(frame_bytes).ok_or("chunk overflow")?;
+    let chunk_bytes = 16_384usize
+        .checked_mul(frame_bytes)
+        .ok_or("chunk overflow")?;
     let mut raw = vec![0u8; chunk_bytes];
     let mut samples: Vec<f64> = Vec::with_capacity(n_per_chunk);
 
@@ -60,13 +60,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file.seek(SeekFrom::Start(0))?;
         let mut loudness = if matches!(mode, "both" | "loudness") {
             Some(LoudnessMeter::with_roles_and_metric_demand_and_limit(
-                sample_rate, &roles, LoudnessProfile::NativeEbu2023,
-                LoudnessMetricDemand::IntegratedOnly, 256 * 1024 * 1024,
+                sample_rate,
+                &roles,
+                LoudnessProfile::NativeEbu2023,
+                LoudnessMetricDemand::IntegratedOnly,
+                256 * 1024 * 1024,
             )?)
-        } else { None };
+        } else {
+            None
+        };
         let mut peak = if matches!(mode, "both" | "peak") {
             Some(ReportingPeakMeter::new(sample_rate, channels)?)
-        } else { None };
+        } else {
+            None
+        };
         let mut remaining = before.len();
         let mut read_ns = 0u128;
         let mut decode_ns = 0u128;

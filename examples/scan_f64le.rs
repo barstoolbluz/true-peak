@@ -28,8 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let count = usize::try_from(remaining.min(buffer_bytes as u64))?;
         file.read_exact(&mut bytes[..count])?;
         samples.clear();
-        for raw in bytes[..count].chunks_exact(8) {
-            samples.push(f64::from_le_bytes(raw.try_into().expect("8-byte f64")));
+        for raw in bytes[..count].as_chunks::<8>().0 {
+            samples.push(f64::from_le_bytes(*raw));
         }
         meter.push_interleaved(&samples)?;
         remaining -= count as u64;

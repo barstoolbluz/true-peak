@@ -14,13 +14,12 @@ use std::sync::OnceLock;
 use crate::fast_stage_timing::StageTimer;
 
 use crate::certified_scan::{
-    dot_rounding_upper, exact_magnitude, lower_sub, magnitude_bits,
-    max_exact_magnitude, max_nonnegative_finite, upper_add, upper_mul,
+    dot_rounding_upper, exact_magnitude, lower_sub, magnitude_bits, max_exact_magnitude,
+    max_nonnegative_finite, upper_add, upper_mul,
 };
 use crate::hq1024_coefficients::{
-    HQ1024_HALF_DELAY_COEFFICIENTS,
-    HQ1024_NODE_A_UPPER, HQ1024_NODE_B_UPPER, HQ1024_TAIL_COEFFICIENTS,
-    HQ1024_TAIL_FACTOR, HQ1024_TAIL_OFFSET_COUNT, HQ1024_TAIL_OFFSET_MAX,
+    HQ1024_HALF_DELAY_COEFFICIENTS, HQ1024_NODE_A_UPPER, HQ1024_NODE_B_UPPER,
+    HQ1024_TAIL_COEFFICIENTS, HQ1024_TAIL_FACTOR, HQ1024_TAIL_OFFSET_COUNT, HQ1024_TAIL_OFFSET_MAX,
     HQ1024_TAIL_OFFSET_MIN,
 };
 use crate::qualified_half_delay_fft::QualifiedHalfDelayFft;
@@ -67,7 +66,10 @@ struct Evaluation {
 }
 
 impl Evaluation {
-    const ZERO: Self = Self { value: 0.0, error: 0.0 };
+    const ZERO: Self = Self {
+        value: 0.0,
+        error: 0.0,
+    };
 
     #[inline]
     fn lower(self) -> f64 {
@@ -139,7 +141,11 @@ fn fast_metadata() -> &'static FastMetadata {
             let right_offset = MIDPOINT_OFFSET_MAX - j as i32;
             let left = row[(left_offset - HQ1024_TAIL_OFFSET_MIN) as usize];
             let right = row[(right_offset - HQ1024_TAIL_OFFSET_MIN) as usize];
-            assert_eq!(left.to_bits(), right.to_bits(), "HQ1024 midpoint symmetry changed");
+            assert_eq!(
+                left.to_bits(),
+                right.to_bits(),
+                "HQ1024 midpoint symmetry changed"
+            );
         }
 
         let mut phase_l1_upper = [0.0; HQ1024_TAIL_FACTOR];
@@ -153,10 +159,8 @@ fn fast_metadata() -> &'static FastMetadata {
 
         let mut first_l1_upper = 0.0;
         for coefficient in HQ1024_HALF_DELAY_COEFFICIENTS {
-            first_l1_upper = upper_add(
-                first_l1_upper,
-                upper_mul(2.0, exact_magnitude(coefficient)),
-            );
+            first_l1_upper =
+                upper_add(first_l1_upper, upper_mul(2.0, exact_magnitude(coefficient)));
         }
 
         FastMetadata {
@@ -180,7 +184,12 @@ struct RawStore {
 
 impl RawStore {
     fn new(channels: usize) -> Self {
-        Self { channels, first_index: None, head_samples: 0, data: Vec::new() }
+        Self {
+            channels,
+            first_index: None,
+            head_samples: 0,
+            data: Vec::new(),
+        }
     }
 
     #[inline]
@@ -190,7 +199,8 @@ impl RawStore {
 
     #[inline]
     fn last_index(&self) -> Option<i128> {
-        self.first_index.map(|first| first + self.live_frames() as i128 - 1)
+        self.first_index
+            .map(|first| first + self.live_frames() as i128 - 1)
     }
 
     fn append(&mut self, start_index: i128, samples: &[f64]) {
@@ -240,7 +250,6 @@ impl RawStore {
         maximum
     }
 
-
     fn channel_window(&self, channel: usize, first: i128, last: i128) -> Vec<f64> {
         let (mut sample_index, frames) = self.channel_range(channel, first, last);
         let mut output = Vec::with_capacity(frames);
@@ -252,11 +261,15 @@ impl RawStore {
     }
 
     fn discard_before(&mut self, keep_index: i128) {
-        let Some(first) = self.first_index else { return; };
+        let Some(first) = self.first_index else {
+            return;
+        };
         if keep_index <= first {
             return;
         }
-        let Some(last) = self.last_index() else { return; };
+        let Some(last) = self.last_index() else {
+            return;
+        };
         let new_first = keep_index.min(last + 1);
         let drop_frames = usize::try_from(new_first - first).expect("raw discard fits usize");
         self.head_samples += drop_frames * self.channels;
@@ -307,7 +320,7 @@ impl ChannelRawSummary {
         }
 
         let d_count = raw_frames - 2;
-        let d_bin_count = (d_count + D_SUMMARY_STARTS - 1) / D_SUMMARY_STARTS;
+        let d_bin_count = d_count.div_ceil(D_SUMMARY_STARTS);
         if magnitude_bits(x_max) == 0 {
             // Every raw sample in the complete screen support is +0 or -0, so
             // every exact second difference and every finite reconstruction
@@ -354,14 +367,15 @@ impl ChannelRawSummary {
             }
             first_index += raw.channels;
         }
-        let e_d = dot_rounding_upper(
-            SECOND_DIFFERENCE_ROUNDING_OPS,
-            upper_mul(4.0, x_max),
-        );
+        let e_d = dot_rounding_upper(SECOND_DIFFERENCE_ROUNDING_OPS, upper_mul(4.0, x_max));
         if !e_d.is_finite() {
             qualified = false;
         }
-        Self { d_bins, e_d, qualified }
+        Self {
+            d_bins,
+            e_d,
+            qualified,
+        }
     }
 
     fn root_d_upper(&self, tile_start: i128, group_start: i128, group_end: i128) -> f64 {
@@ -410,10 +424,7 @@ fn raw_group_upper(sample_max: f64, d_upper: f64) -> f64 {
 #[inline]
 fn tolerance_accepts(upper: f64, lower: f64) -> bool {
     let lower_bits = magnitude_bits(lower);
-    if !upper.is_finite()
-        || lower_bits < F64_MIN_NORMAL_BITS
-        || lower_bits >= F64_INFINITY_BITS
-    {
+    if !upper.is_finite() || !(F64_MIN_NORMAL_BITS..F64_INFINITY_BITS).contains(&lower_bits) {
         return false;
     }
     let product = lower * FAST_ACCEPT_RATIO_DOWN;
@@ -444,7 +455,12 @@ impl TileHalfCache {
                 wanted[usize::try_from(m - first_m).unwrap()] = true;
             }
         }
-        Self { first_m, values: vec![None; len], wanted, dense_source: false }
+        Self {
+            first_m,
+            values: vec![None; len],
+            wanted,
+            dense_source: false,
+        }
     }
 
     #[inline]
@@ -471,7 +487,7 @@ fn child_ranges(children: &[ActiveChild]) -> Vec<(i128, i128)> {
     merge_ranges(&mut ranges)
 }
 
-fn merge_ranges(ranges: &mut Vec<(i128, i128)>) -> Vec<(i128, i128)> {
+fn merge_ranges(ranges: &mut [(i128, i128)]) -> Vec<(i128, i128)> {
     if ranges.is_empty() {
         return Vec::new();
     }
@@ -502,11 +518,16 @@ fn union_count(first: &[(i128, i128)], second: &[(i128, i128)]) -> usize {
 
 fn scale_back(value: f64, inverse_scale: f64) -> Result<f64, TruePeakError> {
     let value = value * inverse_scale;
-    value.is_finite().then_some(value).ok_or(TruePeakError::NumericalOverflow)
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or(TruePeakError::NumericalOverflow)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
+// Tap indices bind both AVX input anchors to the frozen coefficient bank.
+#[allow(clippy::needless_range_loop)]
 unsafe fn direct_half_batch4_avx(
     input: &[f64],
     left_anchor: usize,
@@ -514,8 +535,8 @@ unsafe fn direct_half_batch4_avx(
     output: &mut [f64; 4],
 ) {
     use core::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd,
-        _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd,
+        _mm256_storeu_pd,
     };
     let mut acc = _mm256_setzero_pd();
     for j in 0..HQ1024_HALF_DELAY_COEFFICIENTS.len() {
@@ -525,10 +546,7 @@ unsafe fn direct_half_batch4_avx(
         );
         acc = _mm256_add_pd(
             acc,
-            _mm256_mul_pd(
-                pair,
-                _mm256_set1_pd(HQ1024_HALF_DELAY_COEFFICIENTS[j]),
-            ),
+            _mm256_mul_pd(pair, _mm256_set1_pd(HQ1024_HALF_DELAY_COEFFICIENTS[j])),
         );
     }
     _mm256_storeu_pd(output.as_mut_ptr(), acc);
@@ -581,12 +599,7 @@ fn execute_direct_ranges(
         // Reduce the support maximum in IEEE magnitude encodings. This keeps
         // nonzero classification explicit under DAZ/FTZ and avoids round-
         // tripping the accumulator through `f64` for every input sample.
-        let input_max_bits = input
-            .iter()
-            .copied()
-            .map(magnitude_bits)
-            .max()
-            .unwrap_or(0);
+        let input_max_bits = input.iter().copied().map(magnitude_bits).max().unwrap_or(0);
         if input_max_bits == 0 {
             for m in first..=last {
                 cache.set(m, Evaluation::ZERO);
@@ -602,10 +615,7 @@ fn execute_direct_ranges(
         } else {
             DIRECT_HALF_ROUNDING_OPS
         };
-        let error = dot_rounding_upper(
-            operations,
-            upper_mul(metadata.first_l1_upper, input_max),
-        );
+        let error = dot_rounding_upper(operations, upper_mul(metadata.first_l1_upper, input_max));
         if !error.is_finite() {
             return Err(TruePeakError::NumericalOverflow);
         }
@@ -624,22 +634,15 @@ fn execute_direct_ranges(
         #[cfg(target_arch = "x86_64")]
         if use_avx && !extreme {
             while m + 3 <= last {
-                let left_anchor = usize::try_from(m + 768 - input_first)
-                    .expect("bounded direct left anchor");
-                let right_anchor = usize::try_from(m - 767 - input_first)
-                    .expect("bounded direct right anchor");
+                let left_anchor =
+                    usize::try_from(m + 768 - input_first).expect("bounded direct left anchor");
+                let right_anchor =
+                    usize::try_from(m - 767 - input_first).expect("bounded direct right anchor");
                 let mut values = [0.0; 4];
                 // SAFETY: dispatch is checked once per meter. Each lane is an
                 // independent consecutive output and the range-local input
                 // slice contains the complete support through `last + 768`.
-                unsafe {
-                    direct_half_batch4_avx(
-                        &input,
-                        left_anchor,
-                        right_anchor,
-                        &mut values,
-                    )
-                };
+                unsafe { direct_half_batch4_avx(&input, left_anchor, right_anchor, &mut values) };
                 if values.iter().any(|value| !value.is_finite()) {
                     return Err(TruePeakError::NumericalOverflow);
                 }
@@ -659,17 +662,12 @@ fn execute_direct_ranges(
             (1.0, 1.0)
         };
         while m <= last {
-            let left_anchor = usize::try_from(m + 768 - input_first)
-                .expect("bounded direct left anchor");
-            let right_anchor = usize::try_from(m - 767 - input_first)
-                .expect("bounded direct right anchor");
-            let value = direct_half_scalar(
-                &input,
-                left_anchor,
-                right_anchor,
-                scale,
-                inverse_scale,
-            )?;
+            let left_anchor =
+                usize::try_from(m + 768 - input_first).expect("bounded direct left anchor");
+            let right_anchor =
+                usize::try_from(m - 767 - input_first).expect("bounded direct right anchor");
+            let value =
+                direct_half_scalar(&input, left_anchor, right_anchor, scale, inverse_scale)?;
             cache.set(m, Evaluation { value, error });
             m += 1;
             count += 1;
@@ -693,8 +691,8 @@ fn midpoint_scalar(input: &[f64], metadata: &FastMetadata, scale: f64) -> f64 {
 #[target_feature(enable = "avx")]
 unsafe fn midpoint_batch_avx(input: &[f64], metadata: &FastMetadata, output: &mut [f64]) {
     use core::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd,
-        _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd,
+        _mm256_storeu_pd,
     };
     let mut cell = 0usize;
     while cell + 4 <= output.len() {
@@ -794,7 +792,10 @@ fn tail_dot(
         if use_avx {
             // SAFETY: AVX was detected once per meter; input is exactly 34 values.
             let value = unsafe { tail_dot_avx(input, row) };
-            return value.is_finite().then_some(value).ok_or(TruePeakError::NumericalOverflow);
+            return value
+                .is_finite()
+                .then_some(value)
+                .ok_or(TruePeakError::NumericalOverflow);
         }
         #[cfg(not(target_arch = "x86_64"))]
         let _ = use_avx;
@@ -802,7 +803,9 @@ fn tail_dot(
         for index in 0..HQ1024_TAIL_OFFSET_COUNT {
             sum += input[index] * row[index];
         }
-        sum.is_finite().then_some(sum).ok_or(TruePeakError::NumericalOverflow)
+        sum.is_finite()
+            .then_some(sum)
+            .ok_or(TruePeakError::NumericalOverflow)
     } else {
         let mut sum = 0.0;
         for index in 0..HQ1024_TAIL_OFFSET_COUNT {
@@ -819,7 +822,13 @@ struct LocalCoarse {
 }
 
 impl LocalCoarse {
-    fn build(raw: &RawStore, channel: usize, cache: &TileHalfCache, start: i128, end: i128) -> Self {
+    fn build(
+        raw: &RawStore,
+        channel: usize,
+        cache: &TileHalfCache,
+        start: i128,
+        end: i128,
+    ) -> Self {
         let first = 2 * start - 16;
         let native_first = start - 8;
         let native_last = end + 8;
@@ -828,7 +837,10 @@ impl LocalCoarse {
         let cache_first = cache.offset(native_first);
         let mut values = Vec::with_capacity(original_count * 2 - 1);
         for (offset, sample) in originals.into_iter().enumerate() {
-            values.push(Evaluation { value: sample, error: 0.0 });
+            values.push(Evaluation {
+                value: sample,
+                error: 0.0,
+            });
             if offset + 1 < original_count {
                 values.push(
                     cache.values[cache_first + offset]
@@ -836,7 +848,10 @@ impl LocalCoarse {
                 );
             }
         }
-        debug_assert_eq!(values.len(), usize::try_from(2 * (end - start) + 33).unwrap());
+        debug_assert_eq!(
+            values.len(),
+            usize::try_from(2 * (end - start) + 33).unwrap()
+        );
         Self { first, values }
     }
 
@@ -890,7 +905,10 @@ fn second_difference_upper(first: Evaluation, middle: Evaluation, last: Evaluati
         last.error,
     );
     let operation_scale = upper_add(
-        upper_add(exact_magnitude(first.value), upper_mul(2.0, exact_magnitude(middle.value))),
+        upper_add(
+            exact_magnitude(first.value),
+            upper_mul(2.0, exact_magnitude(middle.value)),
+        ),
         exact_magnitude(last.value),
     );
     upper_add(
@@ -958,7 +976,10 @@ fn cell_components(coarse: &LocalCoarse, cell: i128) -> CellComponents {
             second_difference_upper(window[0], window[1], window[2]),
         );
     }
-    CellComponents { d2_upper, magnitude_upper }
+    CellComponents {
+        d2_upper,
+        magnitude_upper,
+    }
 }
 
 fn node_upper(
@@ -1040,8 +1061,10 @@ pub(crate) fn production_avx_available() -> bool {
 impl FastState {
     fn new(channels: usize, execution_mode: FastExecutionMode) -> Self {
         let use_avx = production_avx_available();
-        let mut diagnostics = SearchDiagnostics::default();
-        diagnostics.accelerated_same_graph_avx_prefix_active = use_avx;
+        let diagnostics = SearchDiagnostics {
+            accelerated_same_graph_avx_prefix_active: use_avx,
+            ..SearchDiagnostics::default()
+        };
         Self {
             channels,
             metadata: fast_metadata(),
@@ -1075,8 +1098,13 @@ impl FastState {
     }
 
     fn ready_for_tile(&self, start: i128, end: i128) -> bool {
-        self.raw.first_index.is_some_and(|first| first <= start - RAW_HALO_FRAMES)
-            && self.raw.last_index().is_some_and(|last| last >= end + RAW_HALO_FRAMES)
+        self.raw
+            .first_index
+            .is_some_and(|first| first <= start - RAW_HALO_FRAMES)
+            && self
+                .raw
+                .last_index()
+                .is_some_and(|last| last >= end + RAW_HALO_FRAMES)
     }
 
     fn process_ready_full_tiles(&mut self) -> Result<(), TruePeakError> {
@@ -1088,7 +1116,8 @@ impl FastState {
             }
             self.process_tile(self.next_tile_start, end)?;
             self.next_tile_start = end;
-            self.raw.discard_before(self.next_tile_start - RAW_HALO_FRAMES);
+            self.raw
+                .discard_before(self.next_tile_start - RAW_HALO_FRAMES);
         }
     }
 
@@ -1099,13 +1128,15 @@ impl FastState {
             debug_assert!(self.ready_for_tile(self.next_tile_start, end));
             self.process_tile(self.next_tile_start, end)?;
             self.next_tile_start = end;
-            self.raw.discard_before(self.next_tile_start - RAW_HALO_FRAMES);
+            self.raw
+                .discard_before(self.next_tile_start - RAW_HALO_FRAMES);
         }
         if self.next_tile_start < final_frame {
             debug_assert!(self.ready_for_tile(self.next_tile_start, final_frame));
             self.process_tile(self.next_tile_start, final_frame)?;
             self.next_tile_start = final_frame;
-            self.raw.discard_before(self.next_tile_start - RAW_HALO_FRAMES);
+            self.raw
+                .discard_before(self.next_tile_start - RAW_HALO_FRAMES);
         } else if final_frame == 0 && self.next_tile_start == 0 {
             for channel in 0..self.channels {
                 let sample = self.raw.sample(0, channel);
@@ -1124,12 +1155,17 @@ impl FastState {
 
     fn observe_sample_tile(&mut self, channel: usize, start: i128, end: i128) {
         let peak = self.raw.max_magnitude(channel, start, end);
-        self.channel_hq4_peaks[channel] = max_nonnegative_finite(self.channel_hq4_peaks[channel], peak);
-        self.channel_point_peaks[channel] = max_nonnegative_finite(self.channel_point_peaks[channel], peak);
-        self.channel_l4_lower[channel] = max_nonnegative_finite(self.channel_l4_lower[channel], peak);
-        self.channel_lower_peaks[channel] = max_nonnegative_finite(self.channel_lower_peaks[channel], peak);
+        self.channel_hq4_peaks[channel] =
+            max_nonnegative_finite(self.channel_hq4_peaks[channel], peak);
+        self.channel_point_peaks[channel] =
+            max_nonnegative_finite(self.channel_point_peaks[channel], peak);
+        self.channel_l4_lower[channel] =
+            max_nonnegative_finite(self.channel_l4_lower[channel], peak);
+        self.channel_lower_peaks[channel] =
+            max_nonnegative_finite(self.channel_lower_peaks[channel], peak);
         let unique = u64::try_from(end - start + 1 - (if start > 0 { 1 } else { 0 })).unwrap();
-        self.diagnostics.fast_survey_knots = self.diagnostics.fast_survey_knots.saturating_add(unique);
+        self.diagnostics.fast_survey_knots =
+            self.diagnostics.fast_survey_knots.saturating_add(unique);
         self.diagnostics.authoritative_coarse_values = self
             .diagnostics
             .authoritative_coarse_values
@@ -1154,7 +1190,8 @@ impl FastState {
                 && root_upper.is_finite()
                 && root_upper <= self.channel_l4_lower[channel]
             {
-                self.diagnostics.groups_rejected = self.diagnostics.groups_rejected.saturating_add(1);
+                self.diagnostics.groups_rejected =
+                    self.diagnostics.groups_rejected.saturating_add(1);
                 root_start = root_end;
                 continue;
             }
@@ -1168,10 +1205,16 @@ impl FastState {
                     && child_upper.is_finite()
                     && child_upper <= self.channel_l4_lower[channel]
                 {
-                    self.diagnostics.groups_rejected = self.diagnostics.groups_rejected.saturating_add(1);
+                    self.diagnostics.groups_rejected =
+                        self.diagnostics.groups_rejected.saturating_add(1);
                 } else {
-                    active.push(ActiveChild { start: child_start, end: child_end, raw_upper: child_upper });
-                    self.diagnostics.groups_expanded = self.diagnostics.groups_expanded.saturating_add(1);
+                    active.push(ActiveChild {
+                        start: child_start,
+                        end: child_end,
+                        raw_upper: child_upper,
+                    });
+                    self.diagnostics.groups_expanded =
+                        self.diagnostics.groups_expanded.saturating_add(1);
                 }
                 child_start = child_end;
             }
@@ -1194,14 +1237,20 @@ impl FastState {
         let window_end = tile_end + RAW_HALO_FRAMES;
         let frames = usize::try_from(window_end - window_start + 1).expect("bounded dense window");
         let need_first = first_cache.wanted.iter().any(|wanted| *wanted);
-        let need_second = second_cache.is_some_and(|cache| cache.wanted.iter().any(|wanted| *wanted));
+        let need_second =
+            second_cache.is_some_and(|cache| cache.wanted.iter().any(|wanted| *wanted));
         let mut packed = Vec::with_capacity(frames * 2);
-        let (mut first_sample, _) = self.raw.channel_range(first_channel, window_start, window_end);
-        let mut second_sample = second_channel.map(|channel| {
-            self.raw.channel_range(channel, window_start, window_end).0
-        });
+        let (mut first_sample, _) = self
+            .raw
+            .channel_range(first_channel, window_start, window_end);
+        let mut second_sample = second_channel
+            .map(|channel| self.raw.channel_range(channel, window_start, window_end).0);
         for _ in 0..frames {
-            packed.push(if need_first { self.raw.data[first_sample] } else { 0.0 });
+            packed.push(if need_first {
+                self.raw.data[first_sample]
+            } else {
+                0.0
+            });
             packed.push(if need_second {
                 self.raw.data[second_sample.expect("second requested channel exists")]
             } else {
@@ -1218,7 +1267,9 @@ impl FastState {
         let mut first = vec![None; len];
         let mut second = vec![None; len];
         let wanted_first = first_cache.wanted.clone();
-        let wanted_second = second_cache.map(|cache| cache.wanted.clone()).unwrap_or_else(|| vec![false; len]);
+        let wanted_second = second_cache
+            .map(|cache| cache.wanted.clone())
+            .unwrap_or_else(|| vec![false; len]);
         let use_avx = self.use_avx;
         let prefix = self.dense_prefix.get_or_insert_with(|| {
             let mut prefix = QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, 2);
@@ -1227,7 +1278,8 @@ impl FastState {
                 .expect("Fast dispatch was validated before lazy prefix construction");
             prefix
         });
-        self.diagnostics.accelerated_same_graph_avx_prefix_active = prefix.fast90_same_graph_avx_active();
+        self.diagnostics.accelerated_same_graph_avx_prefix_active =
+            prefix.fast90_same_graph_avx_active();
         let mut emitted_frames = 0usize;
         let consumed = prefix.process_finite_window_blocks(&packed, window_start, |block| {
             emitted_frames += block.frames;
@@ -1238,7 +1290,9 @@ impl FastState {
                 if offset < 0 {
                     continue;
                 }
-                let Ok(index) = usize::try_from(offset) else { continue; };
+                let Ok(index) = usize::try_from(offset) else {
+                    continue;
+                };
                 if index >= len {
                     continue;
                 }
@@ -1257,10 +1311,19 @@ impl FastState {
             }
         });
         debug_assert_eq!(consumed, frames);
-        Ok(DensePairResult { first_m, first, second, emitted_frames })
+        Ok(DensePairResult {
+            first_m,
+            first,
+            second,
+            emitted_frames,
+        })
     }
 
-    fn apply_dense_result(cache: &mut TileHalfCache, values: &[Option<Evaluation>], first_m: i128) -> usize {
+    fn apply_dense_result(
+        cache: &mut TileHalfCache,
+        values: &[Option<Evaluation>],
+        first_m: i128,
+    ) -> usize {
         let mut retained = 0usize;
         for (index, evaluation) in values.iter().copied().enumerate() {
             if let Some(evaluation) = evaluation {
@@ -1273,17 +1336,25 @@ impl FastState {
     }
 
     fn observe_hq4(&mut self, channel: usize, evaluation: Evaluation) {
-        self.max_evaluation_error = max_nonnegative_finite(self.max_evaluation_error, evaluation.error);
-        self.channel_point_peaks[channel] = max_exact_magnitude(self.channel_point_peaks[channel], evaluation.value);
-        self.channel_hq4_peaks[channel] = max_exact_magnitude(self.channel_hq4_peaks[channel], evaluation.value);
-        self.channel_l4_lower[channel] = max_nonnegative_finite(self.channel_l4_lower[channel], evaluation.lower());
-        self.channel_lower_peaks[channel] = max_nonnegative_finite(self.channel_lower_peaks[channel], evaluation.lower());
+        self.max_evaluation_error =
+            max_nonnegative_finite(self.max_evaluation_error, evaluation.error);
+        self.channel_point_peaks[channel] =
+            max_exact_magnitude(self.channel_point_peaks[channel], evaluation.value);
+        self.channel_hq4_peaks[channel] =
+            max_exact_magnitude(self.channel_hq4_peaks[channel], evaluation.value);
+        self.channel_l4_lower[channel] =
+            max_nonnegative_finite(self.channel_l4_lower[channel], evaluation.lower());
+        self.channel_lower_peaks[channel] =
+            max_nonnegative_finite(self.channel_lower_peaks[channel], evaluation.lower());
     }
 
     fn observe_target(&mut self, channel: usize, evaluation: Evaluation) {
-        self.max_evaluation_error = max_nonnegative_finite(self.max_evaluation_error, evaluation.error);
-        self.channel_point_peaks[channel] = max_exact_magnitude(self.channel_point_peaks[channel], evaluation.value);
-        self.channel_lower_peaks[channel] = max_nonnegative_finite(self.channel_lower_peaks[channel], evaluation.lower());
+        self.max_evaluation_error =
+            max_nonnegative_finite(self.max_evaluation_error, evaluation.error);
+        self.channel_point_peaks[channel] =
+            max_exact_magnitude(self.channel_point_peaks[channel], evaluation.value);
+        self.channel_lower_peaks[channel] =
+            max_nonnegative_finite(self.channel_lower_peaks[channel], evaluation.lower());
     }
 
     fn build_local_survey(
@@ -1351,7 +1422,10 @@ impl FastState {
         // midpoint knots to the unique physical HQ4 work count.
         if count_unique {
             let additional = u64::try_from(3 * (end - start)).unwrap();
-            self.diagnostics.fast_survey_knots = self.diagnostics.fast_survey_knots.saturating_add(additional);
+            self.diagnostics.fast_survey_knots = self
+                .diagnostics
+                .fast_survey_knots
+                .saturating_add(additional);
         }
         self.diagnostics.phase_evaluations = self
             .diagnostics
@@ -1442,12 +1516,14 @@ impl FastState {
                     continue;
                 }
                 if tolerance_accepts(node.upper, lower) {
-                    result.terminal_upper = max_nonnegative_finite(result.terminal_upper, node.upper);
+                    result.terminal_upper =
+                        max_nonnegative_finite(result.terminal_upper, node.upper);
                     continue;
                 }
                 let width = node.high_phase - node.low_phase;
                 if width == 1 {
-                    result.terminal_upper = max_nonnegative_finite(result.terminal_upper, node.upper);
+                    result.terminal_upper =
+                        max_nonnegative_finite(result.terminal_upper, node.upper);
                     result.needs_direct_tightening = true;
                     continue;
                 }
@@ -1498,13 +1574,8 @@ impl FastState {
     ) -> Result<ResolveResult, TruePeakError> {
         #[cfg(feature = "fast-stage-timing")]
         let survey_timer = StageTimer::start();
-        let survey = self.build_local_survey(
-            channel,
-            coarse,
-            child.start,
-            child.end,
-            count_unique_survey,
-        )?;
+        let survey =
+            self.build_local_survey(channel, coarse, child.start, child.end, count_unique_survey)?;
         #[cfg(feature = "fast-stage-timing")]
         survey_timer.finish(&mut self.diagnostics.fast_stage_midpoint_survey_nanos);
 
@@ -1619,7 +1690,10 @@ impl FastState {
         #[cfg(feature = "fast-stage-timing")]
         envelope_timer.finish(&mut self.diagnostics.fast_stage_flat_envelope_nanos);
 
-        let ranges = active.iter().map(|children| child_ranges(children)).collect::<Vec<_>>();
+        let ranges = active
+            .iter()
+            .map(|children| child_ranges(children))
+            .collect::<Vec<_>>();
         let mut caches = ranges
             .iter()
             .map(|channel_ranges| TileHalfCache::new(start, end, channel_ranges))
@@ -1629,7 +1703,9 @@ impl FastState {
         let prefix_timer = StageTimer::start();
         for first_channel in (0..self.channels).step_by(2) {
             let second_channel = (first_channel + 1 < self.channels).then_some(first_channel + 1);
-            let second_ranges = second_channel.map(|channel| ranges[channel].as_slice()).unwrap_or(&[]);
+            let second_ranges = second_channel
+                .map(|channel| ranges[channel].as_slice())
+                .unwrap_or(&[]);
             let requested_union = union_count(&ranges[first_channel], second_ranges);
             if requested_union == 0 {
                 continue;
@@ -1643,17 +1719,26 @@ impl FastState {
                     &caches[first_channel],
                     second_channel.map(|channel| &caches[channel]),
                 )?;
-                let retained_first = Self::apply_dense_result(&mut caches[first_channel], &result.first, result.first_m);
+                let retained_first = Self::apply_dense_result(
+                    &mut caches[first_channel],
+                    &result.first,
+                    result.first_m,
+                );
                 let mut retained = retained_first;
                 if let Some(second_channel) = second_channel {
-                    retained += Self::apply_dense_result(&mut caches[second_channel], &result.second, result.first_m);
+                    retained += Self::apply_dense_result(
+                        &mut caches[second_channel],
+                        &result.second,
+                        result.first_m,
+                    );
                 }
                 self.diagnostics.authoritative_coarse_values = self
                     .diagnostics
                     .authoritative_coarse_values
                     .saturating_add(retained as u64);
                 self.diagnostics.dense_regions = self.diagnostics.dense_regions.saturating_add(1);
-                self.diagnostics.dense_complete_regions = self.diagnostics.dense_complete_regions.saturating_add(1);
+                self.diagnostics.dense_complete_regions =
+                    self.diagnostics.dense_complete_regions.saturating_add(1);
                 self.diagnostics.dense_intermediate_cells = self
                     .diagnostics
                     .dense_intermediate_cells
@@ -1779,7 +1864,11 @@ impl FastState {
             finite_interval: PeakInterval::new(overall_lower, overall_upper),
             channel_intervals,
             channel_upper_linear_peaks,
-            status: if complete { SearchStatus::Complete } else { SearchStatus::WorkLimited },
+            status: if complete {
+                SearchStatus::Complete
+            } else {
+                SearchStatus::WorkLimited
+            },
             diagnostics: self.diagnostics,
         })
     }
@@ -1803,7 +1892,12 @@ impl FastPeakMeterImpl {
         channels: usize,
         edge_policy: EdgePolicy,
     ) -> Result<Self, TruePeakError> {
-        Self::new_with_execution_mode(sample_rate_hz, channels, edge_policy, FastExecutionMode::Production)
+        Self::new_with_execution_mode(
+            sample_rate_hz,
+            channels,
+            edge_policy,
+            FastExecutionMode::Production,
+        )
     }
 
     pub(super) fn new_with_execution_mode(
@@ -1856,7 +1950,9 @@ impl FastPeakMeterImpl {
             return Err("AVX is not available on this qualification host");
         }
         self.state.use_avx = use_avx;
-        self.state.diagnostics.accelerated_same_graph_avx_prefix_active = use_avx;
+        self.state
+            .diagnostics
+            .accelerated_same_graph_avx_prefix_active = use_avx;
         if let Some(prefix) = &mut self.state.dense_prefix {
             prefix.force_fast90_same_graph_avx_for_qualification(use_avx)?;
         }
@@ -1865,14 +1961,18 @@ impl FastPeakMeterImpl {
 
     pub(super) fn push_interleaved(&mut self, samples: &[f64]) -> Result<(), TruePeakError> {
         let channels = self.state.channels;
-        if samples.len() % channels != 0 {
-            return Err(TruePeakError::IncompleteFrame { samples: samples.len(), channels });
+        if !samples.len().is_multiple_of(channels) {
+            return Err(TruePeakError::IncompleteFrame {
+                samples: samples.len(),
+                channels,
+            });
         }
         if samples.is_empty() {
             return Ok(());
         }
         let chunk_frames = samples.len() / channels;
-        let chunk_frames_u64 = u64::try_from(chunk_frames).map_err(|_| TruePeakError::InputTooLong)?;
+        let chunk_frames_u64 =
+            u64::try_from(chunk_frames).map_err(|_| TruePeakError::InputTooLong)?;
         let new_frames = self
             .state
             .nominal_frames_seen
@@ -1907,7 +2007,8 @@ impl FastPeakMeterImpl {
             self.state.raw.append(-RAW_HALO_FRAMES, &self.edge_scratch);
             self.started = true;
         }
-        self.last_frame.copy_from_slice(&samples[samples.len() - channels..]);
+        self.last_frame
+            .copy_from_slice(&samples[samples.len() - channels..]);
         for channel in 0..channels {
             self.state.channel_sample_peaks[channel] = max_nonnegative_finite(
                 self.state.channel_sample_peaks[channel],
@@ -1944,7 +2045,9 @@ impl FastPeakMeterImpl {
             &self.last_frame,
             &mut self.edge_scratch,
         );
-        self.state.raw.append(self.next_input_index, &self.edge_scratch);
+        self.state
+            .raw
+            .append(self.next_input_index, &self.edge_scratch);
         self.state.finalize_certificate()
     }
 }
@@ -1963,7 +2066,11 @@ mod tests {
 
     #[test]
     fn child_request_geometry_matches_frozen_first_stage_support() {
-        let child = ActiveChild { start: 100, end: 132, raw_upper: 1.0 };
+        let child = ActiveChild {
+            start: 100,
+            end: 132,
+            raw_upper: 1.0,
+        };
         let ranges = child_ranges(&[child]);
         assert_eq!(ranges, vec![(92, 139)]);
         assert_eq!(ranges[0].1 - ranges[0].0 + 1, 48);
@@ -1986,7 +2093,11 @@ mod tests {
     #[test]
     fn exact_zero_summary_has_no_roundoff_floor() {
         let raw = test_raw(-RAW_HALO_FRAMES, 2 + RAW_HALO_FRAMES, |index| {
-            if index % 2 == 0 { 0.0 } else { -0.0 }
+            if index % 2 == 0 {
+                0.0
+            } else {
+                -0.0
+            }
         });
         let summary = ChannelRawSummary::build(&raw, 0, 0, 2);
         assert!(summary.qualified);
@@ -2059,12 +2170,7 @@ mod tests {
         }
     }
 
-    fn independent_target(
-        coarse_first: i128,
-        coarse: &[f64],
-        native: i128,
-        phase: usize,
-    ) -> f64 {
+    fn independent_target(coarse_first: i128, coarse: &[f64], native: i128, phase: usize) -> f64 {
         debug_assert!(phase < 1024);
         let coarse_cell = 2 * native + (phase / HQ1024_TAIL_FACTOR) as i128;
         let lookup = |index: i128| coarse[usize::try_from(index - coarse_first).unwrap()];
@@ -2101,8 +2207,16 @@ mod tests {
 
         for &(impulse, amplitude) in &fixtures {
             let raw = test_raw(raw_first, raw_last, |index| {
-                let background = if index.rem_euclid(7) == 0 { 0.003 } else { -0.002 };
-                if index == impulse { amplitude } else { background }
+                let background = if index.rem_euclid(7) == 0 {
+                    0.003
+                } else {
+                    -0.002
+                };
+                if index == impulse {
+                    amplitude
+                } else {
+                    background
+                }
             });
             let summary = ChannelRawSummary::build(&raw, 0, start, end);
             assert!(summary.qualified);
@@ -2229,15 +2343,7 @@ mod tests {
         });
         let ranges = [(-5, 6)];
         let mut scalar_cache = TileHalfCache::new(0, 32, &ranges);
-        execute_direct_ranges(
-            &raw,
-            0,
-            &ranges,
-            &mut scalar_cache,
-            fast_metadata(),
-            false,
-        )
-        .unwrap();
+        execute_direct_ranges(&raw, 0, &ranges, &mut scalar_cache, fast_metadata(), false).unwrap();
 
         for m in ranges[0].0..=ranges[0].1 {
             let evaluation = scalar_cache.get(m);
@@ -2251,20 +2357,15 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         if std::arch::is_x86_feature_detected!("avx") {
             let mut avx_cache = TileHalfCache::new(0, 32, &ranges);
-            execute_direct_ranges(
-                &raw,
-                0,
-                &ranges,
-                &mut avx_cache,
-                fast_metadata(),
-                true,
-            )
-            .unwrap();
+            execute_direct_ranges(&raw, 0, &ranges, &mut avx_cache, fast_metadata(), true).unwrap();
             for m in ranges[0].0..=ranges[0].1 {
                 let scalar = scalar_cache.get(m);
                 let avx = avx_cache.get(m);
                 let oracle = independent_half(&raw, m);
-                assert!((avx.value - oracle).abs() <= avx.error, "AVX enclosure miss at m={m}");
+                assert!(
+                    (avx.value - oracle).abs() <= avx.error,
+                    "AVX enclosure miss at m={m}"
+                );
                 assert!((avx.value - scalar.value).abs() <= upper_add(avx.error, scalar.error));
             }
         }
@@ -2277,9 +2378,8 @@ mod tests {
         let window_start = tile_start - RAW_HALO_FRAMES;
         let window_end = tile_end + RAW_HALO_FRAMES;
         let mut raw = RawStore::new(2);
-        let mut interleaved = Vec::with_capacity(
-            usize::try_from(window_end - window_start + 1).unwrap() * 2,
-        );
+        let mut interleaved =
+            Vec::with_capacity(usize::try_from(window_end - window_start + 1).unwrap() * 2);
         for index in window_start..=window_end {
             let x = index as f64;
             interleaved.push(0.61 * (0.019 * x).sin() - 0.23 * (0.037 * x).cos());
@@ -2309,19 +2409,11 @@ mod tests {
         assert!(dense.second.iter().all(|value| value.is_none()));
 
         let mut direct = TileHalfCache::new(tile_start, tile_end, &requested);
-        execute_direct_ranges(
-            &raw,
-            0,
-            &requested,
-            &mut direct,
-            fast_metadata(),
-            false,
-        )
-        .unwrap();
+        execute_direct_ranges(&raw, 0, &requested, &mut direct, fast_metadata(), false).unwrap();
         for m in requested[0].0..=requested[0].1 {
             let dense_index = usize::try_from(m - dense.first_m).unwrap();
-            let dense_evaluation = dense.first[dense_index]
-                .expect("requested dense half knot must be retained");
+            let dense_evaluation =
+                dense.first[dense_index].expect("requested dense half knot must be retained");
             let direct_evaluation = direct.get(m);
             let oracle = independent_half(&raw, m);
             assert!(
@@ -2384,10 +2476,17 @@ mod tests {
 
         let tiny = f64::from_bits(7);
         let raw = test_raw(-RAW_HALO_FRAMES, 2 + RAW_HALO_FRAMES, |index| {
-            if index == 0 { tiny } else { 0.0 }
+            if index == 0 {
+                tiny
+            } else {
+                0.0
+            }
         });
         let summary = ChannelRawSummary::build(&raw, 0, 0, 2);
-        assert!(!summary.qualified, "a DAZ-sensitive raw support must survive screening");
+        assert!(
+            !summary.qualified,
+            "a DAZ-sensitive raw support must survive screening"
+        );
         assert!(summary.root_d_upper(0, 0, 2).is_infinite());
 
         let ranges = [(-1, 2)];
@@ -2401,9 +2500,18 @@ mod tests {
 
     #[test]
     fn dyadic_child_bounds_replace_their_loose_parent() {
-        let components = CellComponents { d2_upper: 0.05, magnitude_upper: 1.0 };
-        let endpoint = Evaluation { value: 1.0, error: 0.0 };
-        let midpoint = Evaluation { value: 1.0, error: 0.0 };
+        let components = CellComponents {
+            d2_upper: 0.05,
+            magnitude_upper: 1.0,
+        };
+        let endpoint = Evaluation {
+            value: 1.0,
+            error: 0.0,
+        };
+        let midpoint = Evaluation {
+            value: 1.0,
+            error: 0.0,
+        };
         let parent = node_upper(2, 256, endpoint, midpoint, components);
         let left = node_upper(4, 128, endpoint, midpoint, components);
         let right = node_upper(5, 128, midpoint, endpoint, components);
@@ -2454,8 +2562,7 @@ mod tests {
             state.diagnostics.refined_cells,
         );
         assert_eq!(
-            state.diagnostics.phase_evaluations,
-            state.diagnostics.refined_cells,
+            state.diagnostics.phase_evaluations, state.diagnostics.refined_cells,
             "direct resolver exercise must account each tail evaluation in the generic counters",
         );
         assert!(result.needs_direct_tightening);

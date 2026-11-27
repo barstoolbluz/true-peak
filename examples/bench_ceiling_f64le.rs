@@ -3,12 +3,12 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
 
-use true_peak::{
-    CertifiedPeakMeter, EdgePolicy, PeakCertificate, PeakLevel, PeakTier,
-    FAST_ALGORITHM_REVISION, FAST_WALL_NANOS_PER_PROGRAMME_MINUTE,
-};
 #[cfg(feature = "fast-stage-timing")]
 use true_peak::FastCommissioningMode;
+use true_peak::{
+    CertifiedPeakMeter, EdgePolicy, PeakCertificate, PeakLevel, PeakTier, FAST_ALGORITHM_REVISION,
+    FAST_WALL_NANOS_PER_PROGRAMME_MINUTE,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().collect::<Vec<_>>();
@@ -32,21 +32,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "fast-stage-timing")]
     let mut meter = match args[4].as_str() {
         "fast-survey" => CertifiedPeakMeter::new_fast_commissioning(
-            sample_rate_hz, channels, EdgePolicy::RepeatEndpoints,
+            sample_rate_hz,
+            channels,
+            EdgePolicy::RepeatEndpoints,
             FastCommissioningMode::SurveyBoundsOnly,
         )?,
         "fast-nominate" => CertifiedPeakMeter::new_fast_commissioning(
-            sample_rate_hz, channels, EdgePolicy::RepeatEndpoints,
+            sample_rate_hz,
+            channels,
+            EdgePolicy::RepeatEndpoints,
             FastCommissioningMode::NominationOnly,
         )?,
-        _ => CertifiedPeakMeter::new(
-            sample_rate_hz, channels, EdgePolicy::RepeatEndpoints, tier,
-        )?,
+        _ => CertifiedPeakMeter::new(sample_rate_hz, channels, EdgePolicy::RepeatEndpoints, tier)?,
     };
     #[cfg(not(feature = "fast-stage-timing"))]
-    let mut meter = CertifiedPeakMeter::new(
-        sample_rate_hz, channels, EdgePolicy::RepeatEndpoints, tier,
-    )?;
+    let mut meter =
+        CertifiedPeakMeter::new(sample_rate_hz, channels, EdgePolicy::RepeatEndpoints, tier)?;
     let frame_bytes = channels.checked_mul(8).ok_or("frame size overflow")?;
     let buffer_bytes = (1024 * 1024 / frame_bytes).max(1) * frame_bytes;
     let mut file = File::open(&args[1])?;
@@ -68,8 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_started = Instant::now();
         file.read_exact(&mut bytes[..count])?;
         samples.clear();
-        for raw in bytes[..count].chunks_exact(8) {
-            samples.push(f64::from_le_bytes(raw.try_into().expect("8-byte f64")));
+        for raw in bytes[..count].as_chunks::<8>().0 {
+            samples.push(f64::from_le_bytes(*raw));
         }
         #[cfg(feature = "fast-stage-timing")]
         {
@@ -143,14 +144,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fast_stage_timing,
     );
     if binding_fast_wall_gate && !fast_wall_target_met {
-        return Err("fast tier exceeded 0.66 seconds of total wall time per minute of programme audio".into());
+        return Err(
+            "fast tier exceeded 0.66 seconds of total wall time per minute of programme audio"
+                .into(),
+        );
     }
     if binding_fast_accuracy_gate && !fast_accuracy_target_met {
-        return Err("fast tier exceeded the private 0.01 dB per-channel certificate-width gate".into());
+        return Err(
+            "fast tier exceeded the private 0.01 dB per-channel certificate-width gate".into(),
+        );
     }
     Ok(())
 }
-
 
 fn build_metadata_json() -> String {
     format!(

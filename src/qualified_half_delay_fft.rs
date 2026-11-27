@@ -5,29 +5,24 @@ use num_complex::Complex64;
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::{
-    __m256d, _mm256_add_pd, _mm256_addsub_pd, _mm256_loadu_pd, _mm256_mul_pd,
-    _mm256_permute_pd, _mm256_setr_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    __m256d, _mm256_add_pd, _mm256_addsub_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_permute_pd,
+    _mm256_setr_pd, _mm256_storeu_pd, _mm256_sub_pd,
 };
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m256d, _mm256_add_pd, _mm256_addsub_pd, _mm256_loadu_pd, _mm256_mul_pd,
-    _mm256_permute_pd, _mm256_setr_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    __m256d, _mm256_add_pd, _mm256_addsub_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_permute_pd,
+    _mm256_setr_pd, _mm256_storeu_pd, _mm256_sub_pd,
 };
 
+use super::hq1024_coefficients::{HQ1024_FIRST_HALF_DELAY_TAPS, HQ1024_HALF_DELAY_COEFFICIENTS};
 use super::qualified_prefix_coefficients::{
     HQ1024_QUALIFIED_PREFIX_ABSOLUTE_ERROR_UPPER,
     HQ1024_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER,
     LEGACY_QUALIFIED_PREFIX_ABSOLUTE_ERROR_UPPER,
-    LEGACY_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER,
-    QUALIFIED_PREFIX_MAX_FFT_SIZE, QUALIFIED_PREFIX_TWIDDLE_COMPLEX_ERROR_UPPER,
-    QUALIFIED_PREFIX_TWIDDLES_8192,
+    LEGACY_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER, QUALIFIED_PREFIX_MAX_FFT_SIZE,
+    QUALIFIED_PREFIX_TWIDDLES_8192, QUALIFIED_PREFIX_TWIDDLE_COMPLEX_ERROR_UPPER,
 };
-use super::{
-    ReconstructionId, HEADROOM64_HALF_DELAY_COEFFICIENTS, HEADROOM64_HALF_DELAY_TAPS,
-};
-use super::hq1024_coefficients::{
-    HQ1024_FIRST_HALF_DELAY_TAPS, HQ1024_HALF_DELAY_COEFFICIENTS,
-};
+use super::{ReconstructionId, HEADROOM64_HALF_DELAY_COEFFICIENTS, HEADROOM64_HALF_DELAY_TAPS};
 
 const LEGACY_FFT_SIZE: usize = 2048;
 const HQ1024_FFT_SIZE: usize = 8192;
@@ -126,12 +121,8 @@ impl QualifiedHalfDelayKind {
 
     const fn relative_error_per_packed_component_peak_upper(self) -> f64 {
         match self {
-            Self::Legacy384 => {
-                LEGACY_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER
-            }
-            Self::Hq1024V1 => {
-                HQ1024_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER
-            }
+            Self::Legacy384 => LEGACY_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER,
+            Self::Hq1024V1 => HQ1024_QUALIFIED_PREFIX_ERROR_PER_PACKED_COMPONENT_PEAK_UPPER,
         }
     }
 
@@ -202,7 +193,7 @@ fn validate_fixed_fft_geometry(values: &[Complex64]) {
     assert!(
         fft_size.is_power_of_two()
             && fft_size <= QUALIFIED_PREFIX_MAX_FFT_SIZE
-            && QUALIFIED_PREFIX_MAX_FFT_SIZE % fft_size == 0,
+            && QUALIFIED_PREFIX_MAX_FFT_SIZE.is_multiple_of(fft_size),
         "qualified prefix FFT geometry changed",
     );
     // Bind the generated root-error contract into the execution unit as well
@@ -221,19 +212,14 @@ fn fixed_radix2_fft_scalar_stages(values: &mut [Complex64], inverse: bool) {
         let twiddle_stride = QUALIFIED_PREFIX_MAX_FFT_SIZE / span;
         for base in (0..fft_size).step_by(span) {
             for offset in 0..half {
-                let (re, stored_im) =
-                    QUALIFIED_PREFIX_TWIDDLES_8192[offset * twiddle_stride];
+                let (re, stored_im) = QUALIFIED_PREFIX_TWIDDLES_8192[offset * twiddle_stride];
                 let twiddle = Complex64::new(re, if inverse { -stored_im } else { stored_im });
                 let upper = values[base + offset];
                 let rotated = complex_mul(values[base + offset + half], twiddle);
-                values[base + offset] = Complex64::new(
-                    upper.re + rotated.re,
-                    upper.im + rotated.im,
-                );
-                values[base + offset + half] = Complex64::new(
-                    upper.re - rotated.re,
-                    upper.im - rotated.im,
-                );
+                values[base + offset] =
+                    Complex64::new(upper.re + rotated.re, upper.im + rotated.im);
+                values[base + offset + half] =
+                    Complex64::new(upper.re - rotated.re, upper.im - rotated.im);
             }
         }
         span *= 2;
@@ -269,14 +255,8 @@ unsafe fn butterfly_pair_avx(
     let upper = _mm256_loadu_pd(upper_ptr.cast::<f64>());
     let lower = _mm256_loadu_pd(lower_ptr.cast::<f64>());
     let rotated = complex_mul_pair_avx(lower, twiddles);
-    _mm256_storeu_pd(
-        upper_ptr.cast::<f64>(),
-        _mm256_add_pd(upper, rotated),
-    );
-    _mm256_storeu_pd(
-        lower_ptr.cast::<f64>(),
-        _mm256_sub_pd(upper, rotated),
-    );
+    _mm256_storeu_pd(upper_ptr.cast::<f64>(), _mm256_add_pd(upper, rotated));
+    _mm256_storeu_pd(lower_ptr.cast::<f64>(), _mm256_sub_pd(upper, rotated));
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -285,7 +265,10 @@ unsafe fn fixed_radix2_fft_avx_stages(values: &mut [Complex64], inverse: bool) {
     // `num_complex::Complex<f64>` is #[repr(C)] and consists of two adjacent
     // f64 fields.  Unaligned AVX loads/stores therefore consume exactly two
     // consecutive complex values without adding an alignment requirement.
-    debug_assert_eq!(core::mem::size_of::<Complex64>(), 2 * core::mem::size_of::<f64>());
+    debug_assert_eq!(
+        core::mem::size_of::<Complex64>(),
+        2 * core::mem::size_of::<f64>()
+    );
     let fft_size = values.len();
     let mut span = 2usize;
     while span <= fft_size {
@@ -294,8 +277,7 @@ unsafe fn fixed_radix2_fft_avx_stages(values: &mut [Complex64], inverse: bool) {
         for base in (0..fft_size).step_by(span) {
             let mut offset = 0usize;
             while offset + 1 < half {
-                let (re0, stored_im0) =
-                    QUALIFIED_PREFIX_TWIDDLES_8192[offset * twiddle_stride];
+                let (re0, stored_im0) = QUALIFIED_PREFIX_TWIDDLES_8192[offset * twiddle_stride];
                 let (re1, stored_im1) =
                     QUALIFIED_PREFIX_TWIDDLES_8192[(offset + 1) * twiddle_stride];
                 let im0 = if inverse { -stored_im0 } else { stored_im0 };
@@ -310,19 +292,14 @@ unsafe fn fixed_radix2_fft_avx_stages(values: &mut [Complex64], inverse: bool) {
             // to make this routine valid if a smaller supported FFT is
             // introduced without changing the proof graph.
             while offset < half {
-                let (re, stored_im) =
-                    QUALIFIED_PREFIX_TWIDDLES_8192[offset * twiddle_stride];
+                let (re, stored_im) = QUALIFIED_PREFIX_TWIDDLES_8192[offset * twiddle_stride];
                 let twiddle = Complex64::new(re, if inverse { -stored_im } else { stored_im });
                 let upper = values[base + offset];
                 let rotated = complex_mul(values[base + offset + half], twiddle);
-                values[base + offset] = Complex64::new(
-                    upper.re + rotated.re,
-                    upper.im + rotated.im,
-                );
-                values[base + offset + half] = Complex64::new(
-                    upper.re - rotated.re,
-                    upper.im - rotated.im,
-                );
+                values[base + offset] =
+                    Complex64::new(upper.re + rotated.re, upper.im + rotated.im);
+                values[base + offset + half] =
+                    Complex64::new(upper.re - rotated.re, upper.im - rotated.im);
                 offset += 1;
             }
         }
@@ -356,7 +333,6 @@ fn fixed_radix2_fft_fast90(
     // accepts the same validated slice and uses unaligned loads.
     unsafe {
         fixed_radix2_fft_avx_stages(values, inverse);
-        return;
     }
 
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -381,10 +357,7 @@ unsafe fn pointwise_multiply_avx(values: &mut [Complex64], filter: &[Complex64])
         let filter_ptr = filter.as_ptr().add(index);
         let left = _mm256_loadu_pd(values_ptr.cast::<f64>());
         let right = _mm256_loadu_pd(filter_ptr.cast::<f64>());
-        _mm256_storeu_pd(
-            values_ptr.cast::<f64>(),
-            complex_mul_pair_avx(left, right),
-        );
+        _mm256_storeu_pd(values_ptr.cast::<f64>(), complex_mul_pair_avx(left, right));
         let values_ptr_2 = values.as_mut_ptr().add(index + 2);
         let filter_ptr_2 = filter.as_ptr().add(index + 2);
         let left_2 = _mm256_loadu_pd(values_ptr_2.cast::<f64>());
@@ -415,7 +388,6 @@ fn pointwise_multiply_fast90(values: &mut [Complex64], filter: &[Complex64]) {
     // FFT geometry and the implementation uses unaligned loads.
     unsafe {
         pointwise_multiply_avx(values, filter);
-        return;
     }
 
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -443,7 +415,11 @@ fn build_plan(kind: QualifiedHalfDelayKind) -> QualifiedPlan {
     let fft_size = kind.fft_size();
     let taps = kind.taps();
     let half = kind.half_coefficients();
-    assert_eq!(half.len() * 2, taps, "qualified prefix filter geometry changed");
+    assert_eq!(
+        half.len() * 2,
+        taps,
+        "qualified prefix filter geometry changed"
+    );
 
     let mut filter_spectrum = vec![Complex64::new(0.0, 0.0); fft_size];
     for (index, coefficient) in half.iter().copied().enumerate() {
@@ -538,7 +514,9 @@ fn first_stage_l1_upper(kind: QualifiedHalfDelayKind) -> f64 {
             .half_coefficients()
             .iter()
             .copied()
-            .fold(0.0_f64, |sum, coefficient| outward_add(sum, coefficient.abs()));
+            .fold(0.0_f64, |sum, coefficient| {
+                outward_add(sum, coefficient.abs())
+            });
         // The frozen half-delay FIR is symmetric and `half_coefficients` stores
         // exactly one side. Outward addition makes this a source-derived bound
         // on the complete binary64 coefficient L1 norm.
@@ -723,12 +701,7 @@ impl QualifiedHalfDelayFft {
     }
 
     #[cfg(test)]
-    pub(crate) fn process_frame<F>(
-        &mut self,
-        frame: &[f64],
-        input_index: i128,
-        emit: F,
-    ) -> bool
+    pub(crate) fn process_frame<F>(&mut self, frame: &[f64], input_index: i128, emit: F) -> bool
     where
         F: FnMut(i128, &[f64], &[f64], &[f64], &[f64]),
     {
@@ -853,12 +826,8 @@ impl QualifiedHalfDelayFft {
     {
         debug_assert_eq!(samples.len() % self.channels, 0);
         self.reset_finite_window_state();
-        let consumed = self.process_interleaved_blocks(
-            samples,
-            start_input_index,
-            |block| emit(block),
-        );
-        let _ = self.flush_block(|block| emit(block));
+        let consumed = self.process_interleaved_blocks(samples, start_input_index, &mut emit);
+        let _ = self.flush_block(emit);
         self.reset_finite_window_state();
         consumed
     }
@@ -871,10 +840,7 @@ impl QualifiedHalfDelayFft {
         self.pending_start_index = None;
     }
 
-    fn emit_block_frames<F>(
-        block: QualifiedHalfDelayBlock<'_>,
-        emit: &mut F,
-    )
+    fn emit_block_frames<F>(block: QualifiedHalfDelayBlock<'_>, emit: &mut F)
     where
         F: FnMut(i128, &[f64], &[f64], &[f64], &[f64]),
     {
@@ -913,8 +879,7 @@ impl QualifiedHalfDelayFft {
         let inverse_fft_scale = 1.0 / fft_size as f64;
 
         for channel_pair_start in (0..self.channels).step_by(2) {
-            let second =
-                (channel_pair_start + 1 < self.channels).then_some(channel_pair_start + 1);
+            let second = (channel_pair_start + 1 < self.channels).then_some(channel_pair_start + 1);
 
             // IEEE positive finite encodings are monotonically ordered. Keep
             // the packed-pair/component maximum in integer space so DAZ cannot
@@ -993,28 +958,16 @@ impl QualifiedHalfDelayFft {
             }
 
             if self.fast90_same_graph_avx {
-                fixed_radix2_fft_fast90(
-                    &mut self.fft_buffer,
-                    false,
-                    &self.plan.bit_reverse_swaps,
-                );
+                fixed_radix2_fft_fast90(&mut self.fft_buffer, false, &self.plan.bit_reverse_swaps);
                 pointwise_multiply_fast90(&mut self.fft_buffer, &self.plan.filter_spectrum);
-                fixed_radix2_fft_fast90(
-                    &mut self.fft_buffer,
-                    true,
-                    &self.plan.bit_reverse_swaps,
-                );
+                fixed_radix2_fft_fast90(&mut self.fft_buffer, true, &self.plan.bit_reverse_swaps);
             } else {
                 fixed_radix2_fft(&mut self.fft_buffer, false);
                 pointwise_multiply_scalar(&mut self.fft_buffer, &self.plan.filter_spectrum);
                 fixed_radix2_fft(&mut self.fft_buffer, true);
             }
 
-            let error = block_error_upper(
-                self.kind,
-                component_peak_bits,
-                inverse_block_scale,
-            );
+            let error = block_error_upper(self.kind, component_peak_bits, inverse_block_scale);
             self.half_error_by_channel[channel_pair_start] = error;
             if let Some(channel) = second {
                 self.half_error_by_channel[channel] = error;
@@ -1078,10 +1031,8 @@ mod tests {
 
     #[test]
     fn block_api_is_bitwise_identical_to_legacy_frame_adapter() {
-        let mut frame_engine =
-            QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, 2);
-        let mut block_engine =
-            QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, 2);
+        let mut frame_engine = QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, 2);
+        let mut block_engine = QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, 2);
         let frames = frame_engine.block_frames() + 37;
         let mut samples = Vec::with_capacity(frames * 2);
         for frame in 0..frames {
@@ -1248,7 +1199,10 @@ mod tests {
                 },
             );
         }
-        assert!(observed_nonzero_bound, "DAZ/FTZ collapsed a nonzero skipped-prefix enclosure");
+        assert!(
+            observed_nonzero_bound,
+            "DAZ/FTZ collapsed a nonzero skipped-prefix enclosure"
+        );
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -1276,8 +1230,7 @@ mod tests {
 
                 let mut dispatched = source;
                 fixed_radix2_fft_fast90(&mut dispatched, inverse, &swaps);
-                for (index, (expected, actual)) in
-                    scalar.iter().zip(dispatched.iter()).enumerate()
+                for (index, (expected, actual)) in scalar.iter().zip(dispatched.iter()).enumerate()
                 {
                     assert_eq!(
                         expected.re.to_bits(),
@@ -1309,8 +1262,16 @@ mod tests {
         pointwise_multiply_scalar(&mut scalar, &filter);
         pointwise_multiply_fast90(&mut dispatched, &filter);
         for (index, (expected, actual)) in scalar.iter().zip(dispatched.iter()).enumerate() {
-            assert_eq!(expected.re.to_bits(), actual.re.to_bits(), "pointwise real drift at {index}");
-            assert_eq!(expected.im.to_bits(), actual.im.to_bits(), "pointwise imag drift at {index}");
+            assert_eq!(
+                expected.re.to_bits(),
+                actual.re.to_bits(),
+                "pointwise real drift at {index}"
+            );
+            assert_eq!(
+                expected.im.to_bits(),
+                actual.im.to_bits(),
+                "pointwise imag drift at {index}"
+            );
         }
     }
 
@@ -1448,7 +1409,8 @@ mod tests {
                 HQ1024_HALF_DELAY_COEFFICIENTS[HQ1024_FIRST_HALF_DELAY_TAPS - 1 - tap]
             };
             let source = m + 768 - tap as i128;
-            let frame = usize::try_from(source - window_start).expect("retained FIR support in window");
+            let frame =
+                usize::try_from(source - window_start).expect("retained FIR support in window");
             sum += coefficient * samples[frame * channels + channel];
         }
         sum
@@ -1472,12 +1434,17 @@ mod tests {
                     samples.push(
                         0.43 * (0.013 * c * x).sin()
                             + 0.19 * (0.031 * x).cos()
-                            + if (absolute + channel as i128).rem_euclid(11) == 0 { 0.07 } else { -0.03 },
+                            + if (absolute + channel as i128).rem_euclid(11) == 0 {
+                                0.07
+                            } else {
+                                -0.03
+                            },
                     );
                 }
             }
 
-            let mut engine = QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, channels);
+            let mut engine =
+                QualifiedHalfDelayFft::new_fast90(ReconstructionId::Hq1024V1, channels);
             let mut observed = Vec::new();
             let consumed = engine.process_finite_window_blocks(&samples, window_start, |block| {
                 let block_first_m = block.first_coarse_index.div_euclid(2);
@@ -1487,14 +1454,20 @@ mod tests {
                         continue;
                     }
                     for channel in 0..channels {
-                        observed.push((m, channel, block.half[frame * channels + channel], block.half_error_by_channel[channel]));
+                        observed.push((
+                            m,
+                            channel,
+                            block.half[frame * channels + channel],
+                            block.half_error_by_channel[channel],
+                        ));
                     }
                 }
             });
             assert_eq!(consumed, frames);
             assert_eq!(observed.len(), 2 * channels);
             for (m, channel, actual, error) in observed {
-                let direct = finite_window_direct_half(&samples, channels, window_start, m, channel);
+                let direct =
+                    finite_window_direct_half(&samples, channels, window_start, m, channel);
                 assert!(
                     (actual - direct).abs() <= error,
                     "finite-window FFT escaped direct FIR enclosure: channels={channels} m={m} channel={channel}",

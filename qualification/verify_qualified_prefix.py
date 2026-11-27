@@ -174,6 +174,16 @@ def outward_and_tight(published: float, required: mp.mpf) -> bool:
     return p <= required * (1 + mp.mpf("1e-12")) + mp.mpf("1e-320")
 
 
+def has_outward_l1_fold(executor: str) -> bool:
+    """Accept the exact expression, including a rustfmt single-expression block."""
+    return re.search(
+        r"\.fold\(\s*0\.0_f64,\s*\|sum,\s*coefficient\|\s*"
+        r"(?:outward_add\(sum,\s*coefficient\.abs\(\)\)|"
+        r"\{\s*outward_add\(sum,\s*coefficient\.abs\(\)\)\s*\})\s*\)",
+        executor,
+    ) is not None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -324,7 +334,8 @@ def main() -> int:
         ),
         "time_bounded_prefix_skip_uses_source_derived_l1_enclosure": (
             "fn first_stage_l1_upper(kind: QualifiedHalfDelayKind) -> f64" in executor
-            and ".fold(0.0_f64, |sum, coefficient| outward_add(sum, coefficient.abs()))" in executor
+            # rustfmt may wrap the expression in a single-expression block.
+            and has_outward_l1_fold(executor)
             and "outward_add(half, half)" in executor
             and "fn process_frame_with_fft_permission" in executor
             and "if !execute_fft" in executor

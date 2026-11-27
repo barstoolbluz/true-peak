@@ -41,8 +41,14 @@ fn strip_timing(mut certificate: true_peak::PeakCertificate) -> true_peak::PeakC
 #[test]
 fn public_surface_has_three_hq_tiers_with_explicit_contracts() {
     assert_eq!(PeakTier::default(), PeakTier::Standard);
-    assert_eq!(PeakTier::Reference.interval_objective_db(), Some(REFERENCE_INTERVAL_OBJECTIVE_DB));
-    assert_eq!(PeakTier::Standard.interval_objective_db(), Some(STANDARD_INTERVAL_OBJECTIVE_DB));
+    assert_eq!(
+        PeakTier::Reference.interval_objective_db(),
+        Some(REFERENCE_INTERVAL_OBJECTIVE_DB)
+    );
+    assert_eq!(
+        PeakTier::Standard.interval_objective_db(),
+        Some(STANDARD_INTERVAL_OBJECTIVE_DB)
+    );
     assert_eq!(PeakTier::Fast.interval_objective_db(), None);
     assert_eq!(FAST_ALGORITHM_REVISION, "Fast066V2");
     assert_eq!(FAST_WALL_NANOS_PER_PROGRAMME_MINUTE, 660_000_000);
@@ -51,15 +57,25 @@ fn public_surface_has_three_hq_tiers_with_explicit_contracts() {
 #[test]
 fn every_public_ceiling_tier_reports_hq1024v1_and_contains_the_sample_peak() {
     let samples = signal(67, 2);
-    let sample_peak = samples.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    let sample_peak = samples
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
     for tier in [PeakTier::Reference, PeakTier::Standard, PeakTier::Fast] {
-        let mut meter = CertifiedPeakMeter::new(192_000, 2, EdgePolicy::RepeatEndpoints, tier).unwrap();
+        let mut meter =
+            CertifiedPeakMeter::new(192_000, 2, EdgePolicy::RepeatEndpoints, tier).unwrap();
         meter.push_interleaved(&samples).unwrap();
         let certificate = meter.finalize().unwrap();
-        assert_eq!(certificate.reconstruction, CertifiedReconstruction::Hq1024V1);
+        assert_eq!(
+            certificate.reconstruction,
+            CertifiedReconstruction::Hq1024V1
+        );
         assert_eq!(certificate.tier, tier);
         assert!(certificate.finite_interval.lower_linear >= sample_peak);
-        assert!(certificate.finite_interval.upper_linear >= certificate.finite_interval.lower_linear);
+        assert!(
+            certificate.finite_interval.upper_linear >= certificate.finite_interval.lower_linear
+        );
         assert!(matches!(
             certificate.status,
             SearchStatus::Complete | SearchStatus::WorkLimited
@@ -75,7 +91,8 @@ fn reference_and_standard_are_chunk_invariant() {
         whole.push_interleaved(&samples).unwrap();
         let whole = whole.finalize().unwrap();
 
-        let mut chunked = CertifiedPeakMeter::new(192_000, 2, EdgePolicy::ZeroExtend, tier).unwrap();
+        let mut chunked =
+            CertifiedPeakMeter::new(192_000, 2, EdgePolicy::ZeroExtend, tier).unwrap();
         for chunk in samples.chunks(14) {
             chunked.push_interleaved(chunk).unwrap();
         }
@@ -128,13 +145,8 @@ fn fast066_partial_clone_is_independent_of_completion_chunking() {
     const FRAMES: usize = 5003;
     const PREFIX: usize = 911;
     let samples = signal(FRAMES, 2);
-    let mut base = CertifiedPeakMeter::new(
-        192_000,
-        2,
-        EdgePolicy::RepeatEndpoints,
-        PeakTier::Fast,
-    )
-    .unwrap();
+    let mut base =
+        CertifiedPeakMeter::new(192_000, 2, EdgePolicy::RepeatEndpoints, PeakTier::Fast).unwrap();
     base.push_interleaved(&samples[..PREFIX * 2]).unwrap();
 
     let mut whole_tail = base.clone();
@@ -145,7 +157,10 @@ fn fast066_partial_clone_is_independent_of_completion_chunking() {
         // 74 interleaved samples = 37 complete stereo frames.
         prime_tail.push_interleaved(chunk).unwrap();
     }
-    assert_eq!(strip_timing(whole_tail.finalize().unwrap()), strip_timing(prime_tail.finalize().unwrap()));
+    assert_eq!(
+        strip_timing(whole_tail.finalize().unwrap()),
+        strip_timing(prime_tail.finalize().unwrap())
+    );
 }
 
 #[test]
@@ -157,19 +172,19 @@ fn fast066_short_and_tile_boundary_lengths_are_chunk_invariant() {
             samples[frames - 1] = -0.125;
         }
         let run = |chunk_frames: usize| {
-            let mut meter = CertifiedPeakMeter::new(
-                192_000,
-                1,
-                EdgePolicy::ZeroExtend,
-                PeakTier::Fast,
-            )
-            .unwrap();
+            let mut meter =
+                CertifiedPeakMeter::new(192_000, 1, EdgePolicy::ZeroExtend, PeakTier::Fast)
+                    .unwrap();
             for chunk in samples.chunks(chunk_frames) {
                 meter.push_interleaved(chunk).unwrap();
             }
             meter.finalize().unwrap()
         };
-        assert_eq!(strip_timing(run(frames)), strip_timing(run(37)), "frames={frames}");
+        assert_eq!(
+            strip_timing(run(frames)),
+            strip_timing(run(37)),
+            "frames={frames}"
+        );
     }
 }
 
@@ -189,18 +204,16 @@ fn fast066_pruning_ignores_future_validation_peak_in_the_same_caller_push() {
     samples[FUTURE_PEAK_FRAME] = 1.0;
 
     let run = |pattern: &[usize]| {
-        let mut meter = CertifiedPeakMeter::new(
-            192_000,
-            1,
-            EdgePolicy::RepeatEndpoints,
-            PeakTier::Fast,
-        )
-        .unwrap();
+        let mut meter =
+            CertifiedPeakMeter::new(192_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Fast)
+                .unwrap();
         let mut frame = 0usize;
         let mut pattern_index = 0usize;
         while frame < FRAMES {
             let take = pattern[pattern_index % pattern.len()].min(FRAMES - frame);
-            meter.push_interleaved(&samples[frame..frame + take]).unwrap();
+            meter
+                .push_interleaved(&samples[frame..frame + take])
+                .unwrap();
             frame += take;
             pattern_index += 1;
         }
@@ -224,13 +237,14 @@ fn public_reference_constant_carrier_is_chunk_invariant_across_edges() {
     let samples = vec![0.75_f64; 38];
     for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
         let run = |pattern: &[usize]| {
-            let mut meter =
-                CertifiedPeakMeter::new(192_000, 1, edge, PeakTier::Reference).unwrap();
+            let mut meter = CertifiedPeakMeter::new(192_000, 1, edge, PeakTier::Reference).unwrap();
             let mut frame = 0usize;
             let mut pattern_index = 0usize;
             while frame < samples.len() {
                 let take = pattern[pattern_index % pattern.len()].min(samples.len() - frame);
-                meter.push_interleaved(&samples[frame..frame + take]).unwrap();
+                meter
+                    .push_interleaved(&samples[frame..frame + take])
+                    .unwrap();
                 frame += take;
                 pattern_index += 1;
             }
@@ -251,26 +265,54 @@ fn public_reference_constant_carrier_is_chunk_invariant_across_edges() {
 #[test]
 fn fast066_never_reports_time_limited_or_executes_retired_fast_machinery() {
     let samples = signal(257, 1);
-    let mut meter = CertifiedPeakMeter::new(192_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Fast).unwrap();
+    let mut meter =
+        CertifiedPeakMeter::new(192_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Fast).unwrap();
     meter.push_interleaved(&samples).unwrap();
     let certificate = meter.finalize().unwrap();
-    assert!(matches!(certificate.status, SearchStatus::Complete | SearchStatus::WorkLimited));
+    assert!(matches!(
+        certificate.status,
+        SearchStatus::Complete | SearchStatus::WorkLimited
+    ));
     assert_eq!(certificate.diagnostics.time_limited_tiles, 0);
-    assert_eq!(certificate.diagnostics.time_bounded_prefix_blocks_skipped, 0);
+    assert_eq!(
+        certificate.diagnostics.time_bounded_prefix_blocks_skipped,
+        0
+    );
     assert_eq!(certificate.diagnostics.accelerated_l1_groups_tested, 0);
     assert_eq!(certificate.diagnostics.accelerated_l1_groups_rejected, 0);
     assert_eq!(certificate.diagnostics.accelerated_curvature_roots, 0);
     assert!(certificate.diagnostics.fast_survey_knots > 0);
     assert!(certificate.diagnostics.fast_flat_groups > 0);
-    assert!(certificate.diagnostics.fast_hq4_peak_linear >= certificate.diagnostics.fast_input_sample_peak_linear);
-    assert!(certificate.reported_point_estimate.overall.linear() >= certificate.diagnostics.fast_hq4_peak_linear);
+    assert!(
+        certificate.diagnostics.fast_hq4_peak_linear
+            >= certificate.diagnostics.fast_input_sample_peak_linear
+    );
+    assert!(
+        certificate.reported_point_estimate.overall.linear()
+            >= certificate.diagnostics.fast_hq4_peak_linear
+    );
 }
 
 #[test]
 fn reporting_profile_is_separate_and_rate_dependent() {
-    assert_eq!(ReportingPeakMeter::new(44_100, 1).unwrap().oversample_factor(), 4);
-    assert_eq!(ReportingPeakMeter::new(96_000, 1).unwrap().oversample_factor(), 2);
-    assert_eq!(ReportingPeakMeter::new(192_000, 1).unwrap().oversample_factor(), 1);
+    assert_eq!(
+        ReportingPeakMeter::new(44_100, 1)
+            .unwrap()
+            .oversample_factor(),
+        4
+    );
+    assert_eq!(
+        ReportingPeakMeter::new(96_000, 1)
+            .unwrap()
+            .oversample_factor(),
+        2
+    );
+    assert_eq!(
+        ReportingPeakMeter::new(192_000, 1)
+            .unwrap()
+            .oversample_factor(),
+        1
+    );
 }
 
 #[test]
@@ -278,13 +320,21 @@ fn reporting_and_certified_input_validation_is_transactional() {
     let mut reporting = ReportingPeakMeter::new(48_000, 2).unwrap();
     reporting.push_interleaved(&[0.4, -0.3]).unwrap();
     let before = reporting.clone();
-    assert!(matches!(reporting.push_interleaved(&[0.1]), Err(TruePeakError::IncompleteFrame { .. })));
+    assert!(matches!(
+        reporting.push_interleaved(&[0.1]),
+        Err(TruePeakError::IncompleteFrame { .. })
+    ));
     assert_eq!(reporting.finalize().unwrap(), before.finalize().unwrap());
 
-    let mut certified = CertifiedPeakMeter::new(192_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Standard).unwrap();
+    let mut certified =
+        CertifiedPeakMeter::new(192_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Standard)
+            .unwrap();
     certified.push_interleaved(&[0.4]).unwrap();
     let before = certified.clone();
-    assert!(matches!(certified.push_interleaved(&[f64::NAN]), Err(TruePeakError::NonFiniteSample { .. })));
+    assert!(matches!(
+        certified.push_interleaved(&[f64::NAN]),
+        Err(TruePeakError::NonFiniteSample { .. })
+    ));
     assert_eq!(certified.finalize().unwrap(), before.finalize().unwrap());
 }
 
@@ -309,11 +359,7 @@ fn reporting_mono_at_rate(samples: &[f64], sample_rate_hz: u32) -> PeakLevel {
     meter.finalize().unwrap().overall
 }
 
-fn aligned_multitone(
-    frames: usize,
-    aligned_time: f64,
-    components: &[(f64, f64)],
-) -> Vec<f64> {
+fn aligned_multitone(frames: usize, aligned_time: f64, components: &[(f64, f64)]) -> Vec<f64> {
     use std::f64::consts::PI;
     (0..frames)
         .map(|frame| {
@@ -364,8 +410,8 @@ fn reporting_matches_frozen_libebur128_1_2_6_across_sample_rates() {
     let references = [
         (44_100, -6.273_137_129_108_395),
         (48_000, -6.273_137_129_108_395),
-        (96_000, -6.007_520_784_414_950),
-        (192_000, -6.783_443_214_035_310),
+        (96_000, -6.007_520_784_414_95),
+        (192_000, -6.783_443_214_035_31),
     ];
     for (sample_rate_hz, expected_dbtp) in references {
         let measured = finite_dbtp(reporting_mono_at_rate(&signal, sample_rate_hz));
@@ -422,8 +468,10 @@ fn reporting_matches_real_material_frozen_libebur128_reference() {
     const LIBEBUR128_1_2_6_DBTP: f64 = -0.108_161_099_781_057_48;
     assert_eq!(BYTES.len(), FRAMES * CHANNELS * 8);
     let samples = BYTES
-        .chunks_exact(8)
-        .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("exact f64 fixture chunk")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     let mut meter = ReportingPeakMeter::new(48_000, CHANNELS).unwrap();
     meter.push_interleaved(&samples).unwrap();

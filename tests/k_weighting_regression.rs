@@ -11,10 +11,13 @@ fn last(rate: u32, dc: f64, amplitude: f64, chunk: usize) -> f64 {
     while position < 4 * rate as usize {
         let count = chunk.min(4 * rate as usize - position);
         for (n, x) in pcm[..count].iter_mut().enumerate() {
-            let phase = std::f64::consts::TAU * (((position + n) * 1000) % rate as usize) as f64 / f64::from(rate);
+            let phase = std::f64::consts::TAU * (((position + n) * 1000) % rate as usize) as f64
+                / f64::from(rate);
             *x = dc + amplitude * phase.sin();
         }
-        meter.push_interleaved(&pcm[..count], |p| observation = Some(p)).unwrap();
+        meter
+            .push_interleaved(&pcm[..count], |p| observation = Some(p))
+            .unwrap();
         position += count;
     }
     let result = observation.unwrap();
@@ -40,8 +43,14 @@ fn high_rate_low_level_on_dc() {
     let expected = -123.03842522169084;
     for (dc, amplitude) in [(0.01, 1e-6), (-0.01, -1e-6)] {
         let value = last(768_000, dc, amplitude, 1009);
-        eprintln!("768 kHz mixed: {value:.12} LUFS, error {:.12} LU", value - expected);
+        eprintln!(
+            "768 kHz mixed: {value:.12} LUFS, error {:.12} LU",
+            value - expected
+        );
         assert!((value - expected).abs() < 1e-7, "{value} != {expected}");
-        assert_eq!(value.to_bits(), last(768_000, dc, amplitude, 8192).to_bits());
+        assert_eq!(
+            value.to_bits(),
+            last(768_000, dc, amplitude, 8192).to_bits()
+        );
     }
 }

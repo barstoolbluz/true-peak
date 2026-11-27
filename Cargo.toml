@@ -8,6 +8,8 @@ license = "GPL-2.0-or-later"
 
 [features]
 default = []
+# Opt-in native AArch64 qualification candidate; not enabled by default.
+experimental-loudness-neon = []
 # Commissioning-only stage attribution for the Fast066 benchmark. The normal
 # Fast backend contains no timing state or clock reads when this feature is off.
 fast-stage-timing = []

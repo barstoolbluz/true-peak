@@ -7,25 +7,27 @@
 //! requested), and fourth-order K-weighting operation graph.  Legacy loudgain
 //! S16 preparation is a consumer/front-end concern and is not performed here.
 
-mod k_weighting;
 mod fidelity;
+mod k_weighting;
+mod short_term;
 mod simd;
 mod statistics;
-mod short_term;
 pub use short_term::{ShortTermMeter, ShortTermObservation};
+mod energy_cells;
 mod windows;
+use energy_cells::EnergyCells;
 
 use std::error::Error;
 use std::fmt;
 
 use k_weighting::{FilterState, KWeightingCoefficients};
 use statistics::{
-    integrated_from_absolute_energies, lra_from_sorted_absolute_energies,
-    passes_integrated_gate, sort_lra_energies, ABSOLUTE_GATE_ENERGY,
+    integrated_from_absolute_energies, lra_from_sorted_absolute_energies, passes_integrated_gate,
+    sort_lra_energies, ABSOLUTE_GATE_ENERGY,
 };
 use windows::WindowClock;
 
-/// Default admission limit for the meter's ring plus retained exact statistics.
+/// Default admission limit for the meter's fixed working buffers plus retained exact statistics.
 /// Consumers with an application-wide worker budget should use
 /// [`LoudnessMeter::with_roles_and_limit`] instead.
 pub const DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
@@ -108,6 +110,8 @@ pub enum LoudnessSimdBackend {
     Scalar,
     Sse2,
     Avx,
+    #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+    Neon,
 }
 
 impl LoudnessSimdBackend {
@@ -118,6 +122,8 @@ impl LoudnessSimdBackend {
             Self::Scalar => "scalar",
             Self::Sse2 => "sse2",
             Self::Avx => "avx",
+            #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+            Self::Neon => "neon",
         }
     }
 }
@@ -127,9 +133,7 @@ impl LoudnessSimdBackend {
 /// a user-selectable production override.
 #[doc(hidden)]
 #[must_use]
-pub fn production_loudness_simd_backend_for_qualification(
-    channels: usize,
-) -> LoudnessSimdBackend {
+pub fn production_loudness_simd_backend_for_qualification(channels: usize) -> LoudnessSimdBackend {
     simd::Backend::production(channels).qualification_backend()
 }
 
@@ -170,7 +174,10 @@ pub enum IntegratedLoudness {
         relative_observations: usize,
     },
     NoInput,
-    InsufficientFrames { frames: u64, required_frames: u64 },
+    InsufficientFrames {
+        frames: u64,
+        required_frames: u64,
+    },
     BelowAbsoluteGate,
     BelowRelativeGate,
     NoEligibleBlocks,
@@ -194,8 +201,13 @@ pub enum LoudnessRange {
     /// Range was intentionally omitted because no declared consumer requested
     /// it. This is distinct from a requested range with no eligible windows.
     NotRequested,
-    Finite { lu: f64, observations: usize },
-    Unavailable { observations: usize },
+    Finite {
+        lu: f64,
+        observations: usize,
+    },
+    Unavailable {
+        observations: usize,
+    },
 }
 
 impl LoudnessRange {
@@ -301,15 +313,27 @@ pub struct AlbumLoudnessSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoudnessError {
     InvalidSampleRate,
-    UnsupportedSampleRate { sample_rate_hz: u32 },
+    UnsupportedSampleRate {
+        sample_rate_hz: u32,
+    },
     InvalidChannelCount,
-    AmbiguousChannelLayout { channels: usize },
+    AmbiguousChannelLayout {
+        channels: usize,
+    },
     InvalidChannelLayout(String),
-    IncompleteFrame { samples: usize, channels: usize },
-    NonFiniteSample { sample_index: usize },
+    IncompleteFrame {
+        samples: usize,
+        channels: usize,
+    },
+    NonFiniteSample {
+        sample_index: usize,
+    },
     NumericalRange,
     InputTooLong,
-    ResourceLimit { required_bytes: usize, limit_bytes: usize },
+    ResourceLimit {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     AllocationFailed,
     MeterFailed,
     UnsupportedMetricDemand {
@@ -377,11 +401,14 @@ pub struct LoudnessMeter {
     weights: Vec<f64>,
     profile: LoudnessProfile,
     metric_demand: LoudnessMetricDemand,
+    include_integrated: bool,
     simd_backend: simd::Backend,
     coefficients: KWeightingCoefficients,
     filters: Vec<FilterState>,
     fidelity: Option<fidelity::Filter>,
+    // Compatibility PCM ring, or one native filtered-frame scratch buffer.
     ring: Vec<f64>,
+    cells: Option<EnergyCells>,
     ring_frames: usize,
     write_frame: usize,
     clock: WindowClock,
@@ -485,7 +512,11 @@ impl LoudnessMeter {
         storage_limit_bytes: usize,
     ) -> Result<Self, LoudnessError> {
         Self::build(
-            sample_rate_hz, roles, profile, metric_demand, storage_limit_bytes,
+            sample_rate_hz,
+            roles,
+            profile,
+            metric_demand,
+            storage_limit_bytes,
         )
     }
 
@@ -498,22 +529,29 @@ impl LoudnessMeter {
         roles: &[ChannelRole],
     ) -> Result<Self, LoudnessError> {
         Self::with_roles_high_fidelity_and_metric_demand_and_limit(
-            sample_rate_hz, roles, LoudnessMetricDemand::IntegratedAndRange,
+            sample_rate_hz,
+            roles,
+            LoudnessMetricDemand::IntegratedAndRange,
             DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES,
         )
     }
 
     /// Conditioned native meter with explicit metric demand and storage limit.
     /// Window clocks, gating, channel weighting and EOF continuation match
-    /// `NativeEbu2023`; only the numerical realization of the filter changes.
+    /// `NativeEbu2023`, including its conditioned filter and energy cells.
     pub fn with_roles_high_fidelity_and_metric_demand_and_limit(
         sample_rate_hz: u32,
         roles: &[ChannelRole],
         metric_demand: LoudnessMetricDemand,
         storage_limit_bytes: usize,
     ) -> Result<Self, LoudnessError> {
-        Self::build(sample_rate_hz, roles, LoudnessProfile::NativeEbu2023,
-            metric_demand, storage_limit_bytes)
+        Self::build(
+            sample_rate_hz,
+            roles,
+            LoudnessProfile::NativeEbu2023,
+            metric_demand,
+            storage_limit_bytes,
+        )
     }
 
     fn build(
@@ -553,13 +591,15 @@ impl LoudnessMeter {
         let channels = roles.len();
         let coefficients = KWeightingCoefficients::for_rate(sample_rate_hz)?;
         let clock = WindowClock::new(sample_rate_hz, profile)?;
-        let requested_ring_frames = if metric_demand.includes_range() {
+        let requested_ring_frames = if high_fidelity {
+            1
+        } else if metric_demand.includes_range() {
             clock.ring_frames()
         } else {
             clock.integrated_window_frames()
         };
-        let ring_frames = usize::try_from(requested_ring_frames)
-            .map_err(|_| LoudnessError::InputTooLong)?;
+        let ring_frames =
+            usize::try_from(requested_ring_frames).map_err(|_| LoudnessError::InputTooLong)?;
         let ring_samples = ring_frames
             .checked_mul(channels)
             .ok_or(LoudnessError::InputTooLong)?;
@@ -580,8 +620,14 @@ impl LoudnessMeter {
         let role_bytes = channels
             .checked_mul(std::mem::size_of::<ChannelRole>())
             .ok_or(LoudnessError::InputTooLong)?;
+        let cell_bytes = if high_fidelity {
+            EnergyCells::requested_bytes(channels, metric_demand.includes_range())
+        } else {
+            0
+        };
         let requested_fixed_storage_bytes = ring_bytes
-            .checked_add(filter_bytes)
+            .checked_add(cell_bytes)
+            .and_then(|value| value.checked_add(filter_bytes))
             .and_then(|value| value.checked_add(weight_bytes))
             .and_then(|value| value.checked_add(role_bytes))
             .ok_or(LoudnessError::InputTooLong)?;
@@ -596,12 +642,27 @@ impl LoudnessMeter {
         ring.try_reserve_exact(ring_samples)
             .map_err(|_| LoudnessError::AllocationFailed)?;
         ring.resize(ring_samples, 0.0);
+        let cells = if high_fidelity {
+            Some(EnergyCells::new(
+                sample_rate_hz,
+                channels,
+                metric_demand.includes_range(),
+            )?)
+        } else {
+            None
+        };
+        let actual_cell_bytes = match &cells {
+            Some(cells) => cells.retained_bytes()?,
+            None => 0,
+        };
 
         let mut filters = Vec::new();
         let fidelity = if high_fidelity {
             Some(fidelity::Filter::new(sample_rate_hz, channels)?)
         } else {
-            filters.try_reserve_exact(channels).map_err(|_| LoudnessError::AllocationFailed)?;
+            filters
+                .try_reserve_exact(channels)
+                .map_err(|_| LoudnessError::AllocationFailed)?;
             filters.resize(channels, FilterState::default());
             None
         };
@@ -624,11 +685,14 @@ impl LoudnessMeter {
         let fixed_storage_bytes = ring
             .capacity()
             .checked_mul(std::mem::size_of::<f64>())
+            .and_then(|value| value.checked_add(actual_cell_bytes))
             .and_then(|value| {
                 let bytes = if let Some(f) = &fidelity {
                     f.states.capacity().checked_mul(std::mem::size_of::<f64>())
                 } else {
-                    filters.capacity().checked_mul(std::mem::size_of::<FilterState>())
+                    filters
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<FilterState>())
                 };
                 bytes.and_then(|bytes| value.checked_add(bytes))
             })
@@ -664,11 +728,13 @@ impl LoudnessMeter {
             weights,
             profile,
             metric_demand,
+            include_integrated: true,
             simd_backend,
             coefficients,
             filters,
             fidelity,
             ring,
+            cells,
             ring_frames,
             write_frame: 0,
             clock,
@@ -704,6 +770,14 @@ impl LoudnessMeter {
             LoudnessSimdBackend::Avx => simd::Backend::avx_if_available(),
             #[cfg(not(target_arch = "x86_64"))]
             LoudnessSimdBackend::Sse2 | LoudnessSimdBackend::Avx => None,
+            #[cfg(all(target_arch = "aarch64", feature = "experimental-loudness-neon"))]
+            LoudnessSimdBackend::Neon => {
+                if self.profile == LoudnessProfile::NativeEbu2023 {
+                    simd::Backend::neon_if_available()
+                } else {
+                    None
+                }
+            }
         };
         self.simd_backend = selected.ok_or(LoudnessError::MeterFailed)?;
         Ok(())
@@ -736,82 +810,86 @@ impl LoudnessMeter {
 
     #[must_use]
     pub fn retained_storage_bytes(&self) -> usize {
-        self.fixed_storage_bytes.saturating_add(self.history_storage_bytes)
+        self.fixed_storage_bytes
+            .saturating_add(self.history_storage_bytes)
     }
 
-    /// Validate an entire push before changing DSP state, then process complete
-    /// interleaved frames.  Empty pushes are no-ops.
-    pub fn push_interleaved(&mut self, samples: &[f64]) -> Result<(), LoudnessError> {
+    // Validate before either DSP consumer mutates state. A successful empty
+    // push does not reserve history or advance either observation clock.
+    fn validate_push(&self, samples: &[f64]) -> Result<(u64, u64), LoudnessError> {
         if self.failed {
             return Err(LoudnessError::MeterFailed);
         }
-        if samples.len() % self.channels != 0 {
+        if !samples.len().is_multiple_of(self.channels) {
             return Err(LoudnessError::IncompleteFrame {
                 samples: samples.len(),
                 channels: self.channels,
             });
         }
-        if let Some((sample_index, _)) = samples
-            .iter()
-            .enumerate()
-            .find(|(_, sample)| !sample.is_finite())
-        {
+        if let Some(sample_index) = samples.iter().position(|sample| !sample.is_finite()) {
             return Err(LoudnessError::NonFiniteSample { sample_index });
         }
-        if samples.is_empty() {
-            return Ok(());
-        }
-
         let new_frames = u64::try_from(samples.len() / self.channels)
             .map_err(|_| LoudnessError::InputTooLong)?;
         let target = self
             .frames_seen
             .checked_add(new_frames)
             .ok_or(LoudnessError::InputTooLong)?;
+        Ok((new_frames, target))
+    }
+
+    /// Validate an entire push before changing DSP state, then process complete
+    /// interleaved frames. Empty pushes are no-ops.
+    pub fn push_interleaved(&mut self, samples: &[f64]) -> Result<(), LoudnessError> {
+        let (new_frames, target) = self.validate_push(samples)?;
+        if new_frames == 0 {
+            return Ok(());
+        }
         let include_lra = self.metric_demand.includes_range();
-        self.preflight_history(target, true, include_lra)?;
+        let include_integrated = self.include_integrated;
+        self.preflight_history(target, include_integrated, include_lra)?;
 
         if self.fidelity.is_some() {
             for frame in samples.chunks_exact(self.channels) {
-                if let Err(error) = self.process_frame_fidelity(frame, true, include_lra) {
+                if let Err(error) =
+                    self.process_frame_fidelity(frame, include_integrated, include_lra)
+                {
                     self.failed = true;
                     return Err(error);
                 }
             }
         } else if self.simd_backend.is_scalar() {
             for frame in samples.chunks_exact(self.channels) {
-                if let Err(error) = self.process_frame_scalar(frame, true, include_lra) {
+                if let Err(error) =
+                    self.process_frame_scalar(frame, include_integrated, include_lra)
+                {
                     self.failed = true;
                     return Err(error);
                 }
             }
         } else {
             for frame in samples.chunks_exact(self.channels) {
-                if let Err(error) = self.process_frame_simd(frame, true, include_lra) {
+                if let Err(error) = self.process_frame_simd(frame, include_integrated, include_lra)
+                {
                     self.failed = true;
                     return Err(error);
                 }
             }
         }
-        self.real_frames = self
-            .real_frames
-            .checked_add(new_frames)
-            .ok_or_else(|| {
-                self.failed = true;
-                LoudnessError::InputTooLong
-            })?;
+        self.real_frames = self.real_frames.checked_add(new_frames).ok_or_else(|| {
+            self.failed = true;
+            LoudnessError::InputTooLong
+        })?;
         Ok(())
     }
 
-    /// Consume the meter and freeze both the summary and mergeable statistics.
-    pub fn finalize(mut self) -> Result<LoudnessMeasurement, LoudnessError> {
+    fn continue_range_at_eof(&mut self) -> Result<(), LoudnessError> {
         if self.failed {
             return Err(LoudnessError::MeterFailed);
         }
-        let real_frames = self.real_frames;
         if self.profile == LoudnessProfile::NativeEbu2023
             && self.metric_demand.includes_range()
-            && real_frames > 0
+            && self.real_frames > 0
         {
             let continuation_frames = u64::from(self.sample_rate_hz)
                 .checked_mul(3)
@@ -843,6 +921,13 @@ impl LoudnessMeter {
             }
         }
 
+        Ok(())
+    }
+
+    /// Consume the meter and freeze both the summary and mergeable statistics.
+    pub fn finalize(mut self) -> Result<LoudnessMeasurement, LoudnessError> {
+        self.continue_range_at_eof()?;
+        let real_frames = self.real_frames;
         if self.metric_demand.includes_range() {
             sort_lra_energies(&mut self.lra_energies);
         }
@@ -877,7 +962,10 @@ impl LoudnessMeter {
             lra_energies: self.lra_energies,
             real_frames,
         };
-        Ok(LoudnessMeasurement { summary, statistics })
+        Ok(LoudnessMeasurement {
+            summary,
+            statistics,
+        })
     }
 
     fn preflight_history(
@@ -886,9 +974,9 @@ impl LoudnessMeter {
         include_integrated: bool,
         include_lra: bool,
     ) -> Result<(), LoudnessError> {
-        let (integrated, lra) = self
-            .clock
-            .events_due_through(target_frames, include_integrated, include_lra)?;
+        let (integrated, lra) =
+            self.clock
+                .events_due_through(target_frames, include_integrated, include_lra)?;
         let capacities_before = (
             self.integrated_energies.capacity(),
             self.lra_energies.capacity(),
@@ -927,6 +1015,8 @@ impl LoudnessMeter {
         result
     }
 
+    // Keep the qualified indexed scalar fallback and compatibility arithmetic.
+    #[allow(clippy::needless_range_loop)]
     fn process_frame_scalar(
         &mut self,
         frame: &[f64],
@@ -987,20 +1077,22 @@ impl LoudnessMeter {
         emit_lra: bool,
     ) -> Result<(), LoudnessError> {
         debug_assert_eq!(frame.len(), self.channels);
-        let base = self.write_frame.checked_mul(self.channels).ok_or(LoudnessError::InputTooLong)?;
+        let base = self
+            .write_frame
+            .checked_mul(self.channels)
+            .ok_or(LoudnessError::InputTooLong)?;
         let out = &mut self.ring[base..base + self.channels];
-        self.fidelity.as_mut().expect("selected fidelity path").frame(self.simd_backend, frame, out);
+        self.fidelity
+            .as_mut()
+            .expect("selected fidelity path")
+            .frame(self.simd_backend, frame, out);
         if out.iter().any(|y| !y.is_finite()) {
             return Err(LoudnessError::NumericalRange);
         }
         self.finish_frame(emit_integrated, emit_lra)
     }
 
-    fn finish_frame(
-        &mut self,
-        emit_integrated: bool,
-        emit_lra: bool,
-    ) -> Result<(), LoudnessError> {
+    fn finish_frame(&mut self, emit_integrated: bool, emit_lra: bool) -> Result<(), LoudnessError> {
         self.write_frame += 1;
         if self.write_frame == self.ring_frames {
             self.write_frame = 0;
@@ -1010,6 +1102,10 @@ impl LoudnessMeter {
             .checked_add(1)
             .ok_or(LoudnessError::InputTooLong)?;
 
+        if let Some(cells) = &mut self.cells {
+            // Native ring_frames == 1, so the scratch is the frame just filtered.
+            cells.push(self.frames_seen, &self.ring, &self.weights)?;
+        }
         if emit_integrated && self.clock.take_integrated_if_due(self.frames_seen)? {
             let energy = self.window_energy(self.clock.integrated_window_frames())?;
             if passes_integrated_gate(energy, ABSOLUTE_GATE_ENERGY, self.profile) {
@@ -1026,12 +1122,34 @@ impl LoudnessMeter {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn use_native_reference_ring(&mut self) {
+        assert_eq!(self.profile, LoudnessProfile::NativeEbu2023);
+        assert_eq!(self.frames_seen, 0);
+        let old_bytes = self.ring.capacity() * std::mem::size_of::<f64>()
+            + self.cells.take().unwrap().retained_bytes().unwrap();
+        self.ring_frames = if self.metric_demand.includes_range() {
+            self.clock.ring_frames() as usize
+        } else {
+            self.clock.integrated_window_frames() as usize
+        };
+        self.ring = vec![0.0; self.ring_frames * self.channels];
+        self.fixed_storage_bytes = self.fixed_storage_bytes - old_bytes
+            + self.ring.capacity() * std::mem::size_of::<f64>();
+    }
+
+    // Keep the qualified compatibility window reduction and channel order.
+    #[allow(clippy::needless_range_loop)]
     fn window_energy(&self, window_frames: u64) -> Result<f64, LoudnessError> {
+        if let Some(cells) = &self.cells {
+            return cells.energy(self.frames_seen, window_frames, &self.weights);
+        }
         if self.simd_backend.is_scalar() {
             return self.window_energy_scalar(window_frames);
         }
 
-        let window_frames = usize::try_from(window_frames).map_err(|_| LoudnessError::InputTooLong)?;
+        let window_frames =
+            usize::try_from(window_frames).map_err(|_| LoudnessError::InputTooLong)?;
         if window_frames == 0 || window_frames > self.ring_frames {
             return Err(LoudnessError::InputTooLong);
         }
@@ -1085,7 +1203,8 @@ impl LoudnessMeter {
     }
 
     fn window_energy_scalar(&self, window_frames: u64) -> Result<f64, LoudnessError> {
-        let window_frames = usize::try_from(window_frames).map_err(|_| LoudnessError::InputTooLong)?;
+        let window_frames =
+            usize::try_from(window_frames).map_err(|_| LoudnessError::InputTooLong)?;
         if window_frames == 0 || window_frames > self.ring_frames {
             return Err(LoudnessError::InputTooLong);
         }
@@ -1113,10 +1232,7 @@ impl LoudnessMeter {
                 // the tail at the end of the ring. That is not chronological
                 // order. Preserve it because the summation order is observable
                 // at binary64 rounding boundaries.
-                for sample in self.ring[channel..second_end]
-                    .iter()
-                    .step_by(self.channels)
-                {
+                for sample in self.ring[channel..second_end].iter().step_by(self.channels) {
                     channel_sum += *sample * *sample;
                 }
                 for sample in self.ring[first_start..first_end]
@@ -1133,10 +1249,7 @@ impl LoudnessMeter {
                     channel_sum += *sample * *sample;
                 }
                 if second_frames > 0 {
-                    for sample in self.ring[channel..second_end]
-                        .iter()
-                        .step_by(self.channels)
-                    {
+                    for sample in self.ring[channel..second_end].iter().step_by(self.channels) {
                         channel_sum += *sample * *sample;
                     }
                 }
@@ -1149,6 +1262,110 @@ impl LoudnessMeter {
         } else {
             Err(LoudnessError::NumericalRange)
         }
+    }
+}
+
+/// Native loudness-range-only streaming meter. Uses the same conditioned
+/// filter, cells, rational observation clock and EOF continuation as the full
+/// native meter, without integrated observations or retained integrated history.
+/// It intentionally exposes no integrated result or mergeable full statistics.
+#[derive(Debug)]
+pub struct LoudnessRangeMeter {
+    inner: LoudnessMeter,
+}
+
+impl LoudnessRangeMeter {
+    /// Construct a range-only meter for explicit decoded channel roles.
+    pub fn new(sample_rate_hz: u32, roles: &[ChannelRole]) -> Result<Self, LoudnessError> {
+        let mut inner = LoudnessMeter::with_roles_high_fidelity(sample_rate_hz, roles)?;
+        inner.include_integrated = false;
+        Ok(Self { inner })
+    }
+
+    /// Feed complete interleaved PCM frames, with the full meter's validation
+    /// and terminal numerical-failure semantics for requested observations.
+    pub fn push_interleaved(&mut self, samples: &[f64]) -> Result<(), LoudnessError> {
+        self.inner.push_interleaved(samples)
+    }
+
+    /// Complete native range observations, including the documented EOF
+    /// continuation, then return the gated nearest-rank loudness range.
+    pub fn finalize(mut self) -> Result<LoudnessRange, LoudnessError> {
+        self.inner.continue_range_at_eof()?;
+        sort_lra_energies(&mut self.inner.lra_energies);
+        Ok(lra_from_sorted_absolute_energies(
+            &self.inner.lra_energies,
+            self.inner.profile,
+        ))
+    }
+}
+
+/// Native range and ungated short-term loudness from one conditioned filter.
+/// Requests both measurements, with independent observation clocks and
+/// arithmetic. Only real input frames reach the short-term observer; native
+/// range-only EOF continuation remains private to the range meter.
+///
+/// Use [`LoudnessRangeMeter`] or [`ShortTermMeter`] when only one measurement
+/// is needed. No integrated observations are accumulated by this meter.
+#[derive(Debug)]
+pub struct LoudnessRangeAndShortTermMeter {
+    range: LoudnessRangeMeter,
+    short: short_term::ShortTermObservations,
+}
+
+impl LoudnessRangeAndShortTermMeter {
+    /// Construct a shared native meter for explicit roles and rates from
+    /// 8,000 through 2,822,400 Hz (the short-term meter's admitted range).
+    pub fn new(sample_rate_hz: u32, roles: &[ChannelRole]) -> Result<Self, LoudnessError> {
+        let short = short_term::ShortTermObservations::new(sample_rate_hz)?;
+        let range = LoudnessRangeMeter::new(sample_rate_hz, roles)?;
+        Ok(Self { range, short })
+    }
+
+    /// Feed complete interleaved PCM and emit real short-term observations in
+    /// chronological order. Invalid input is rejected before DSP mutation;
+    /// numerical failure is terminal. Observations emitted before a terminal
+    /// failure are not rolled back.
+    pub fn push_interleaved(
+        &mut self,
+        samples: &[f64],
+        mut emit: impl FnMut(ShortTermObservation),
+    ) -> Result<(), LoudnessError> {
+        let meter = &mut self.range.inner;
+        let (new_frames, target) = meter.validate_push(samples)?;
+        if new_frames == 0 {
+            return Ok(());
+        }
+        self.short.preflight(new_frames)?;
+        meter.preflight_history(target, false, true)?;
+        debug_assert!(meter.cells.is_some() && meter.ring_frames == 1);
+        for frame in samples.chunks_exact(meter.channels) {
+            if let Err(error) = meter.process_frame_fidelity(frame, false, true) {
+                meter.failed = true;
+                return Err(error);
+            }
+            // Native cells leave exactly the latest filtered frame in ring.
+            // The observer retains its own original reduction graph.
+            match self.short.observe(&meter.ring, &meter.weights) {
+                Ok(Some(point)) => emit(point),
+                Ok(None) => (),
+                Err(error) => {
+                    meter.failed = true;
+                    return Err(error);
+                }
+            }
+        }
+        meter.real_frames = meter.real_frames.checked_add(new_frames).ok_or_else(|| {
+            meter.failed = true;
+            LoudnessError::InputTooLong
+        })?;
+        Ok(())
+    }
+
+    /// Finish range observations using native EOF continuation. No synthetic
+    /// short-term points are produced by finalization.
+    pub fn finalize(self) -> Result<LoudnessRange, LoudnessError> {
+        self.range.finalize()
     }
 }
 
@@ -1260,7 +1477,6 @@ impl AlbumLoudnessBuilder {
             });
         }
 
-
         // The first participant already owns exactly the buffers the album
         // reducer needs. Reuse them only when every consumed buffer is tight;
         // retaining spare capacity here could make a later track fail where the
@@ -1268,8 +1484,7 @@ impl AlbumLoudnessBuilder {
         let can_adopt_first = self.tracks == 0
             && self.integrated_energies.is_empty()
             && self.lra_energies.is_empty()
-            && statistics.integrated_energies.capacity()
-                == statistics.integrated_energies.len()
+            && statistics.integrated_energies.capacity() == statistics.integrated_energies.len()
             && (!self.metric_demand.includes_range()
                 || statistics.lra_energies.capacity() == statistics.lra_energies.len());
         if can_adopt_first {
@@ -1288,8 +1503,7 @@ impl AlbumLoudnessBuilder {
                     self.profile = Some(statistics.profile);
                 }
                 self.real_frames = next_real_frames;
-                self.reporting_peak_linear =
-                    self.reporting_peak_linear.max(reporting_peak_linear);
+                self.reporting_peak_linear = self.reporting_peak_linear.max(reporting_peak_linear);
                 self.integrated_energies = statistics.integrated_energies;
                 if self.metric_demand.includes_range() {
                     self.lra_energies = statistics.lra_energies;
@@ -1411,7 +1625,8 @@ fn validate_roles(roles: &[ChannelRole], profile: LoudnessProfile) -> Result<(),
     if profile == LoudnessProfile::NativeEbu2023 {
         if roles.contains(&ChannelRole::Unused) {
             return Err(LoudnessError::InvalidChannelLayout(
-                "native loudness layouts may not contain compatibility-only unused channels".to_string(),
+                "native loudness layouts may not contain compatibility-only unused channels"
+                    .to_string(),
             ));
         }
         for (index, role) in roles.iter().enumerate() {
@@ -1428,10 +1643,7 @@ fn validate_roles(roles: &[ChannelRole], profile: LoudnessProfile) -> Result<(),
             ));
         }
     }
-    let audible = roles
-        .iter()
-        .copied()
-        .any(|role| role.energy_weight() > 0.0);
+    let audible = roles.iter().copied().any(|role| role.energy_weight() > 0.0);
     if !audible {
         return Err(LoudnessError::InvalidChannelLayout(
             "loudness layout contains no weighted programme channels".to_string(),
@@ -1550,8 +1762,8 @@ mod tests {
     fn tone(rate: u32, frames: usize, amplitude: f64, start: usize) -> Vec<f64> {
         let mut pcm = Vec::with_capacity(frames * 2);
         for n in start..start + frames {
-            let value = amplitude
-                * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / f64::from(rate)).sin();
+            let value =
+                amplitude * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / f64::from(rate)).sin();
             pcm.extend([value, value]);
         }
         pcm
@@ -1560,7 +1772,9 @@ mod tests {
     #[test]
     fn libebur128_first_integrated_boundary_matches_reference_probe() {
         let mut short = LoudnessMeter::libebur128_126_default_layout(48_000, 2).unwrap();
-        short.push_interleaved(&tone(48_000, 19_199, 0.1, 0)).unwrap();
+        short
+            .push_interleaved(&tone(48_000, 19_199, 0.1, 0))
+            .unwrap();
         let short = short.finalize().unwrap();
         assert!(matches!(
             short.summary.integrated,
@@ -1568,11 +1782,16 @@ mod tests {
         ));
 
         let mut exact = LoudnessMeter::libebur128_126_default_layout(48_000, 2).unwrap();
-        exact.push_interleaved(&tone(48_000, 19_200, 0.1, 0)).unwrap();
+        exact
+            .push_interleaved(&tone(48_000, 19_200, 0.1, 0))
+            .unwrap();
         let exact = exact.finalize().unwrap();
         let actual = exact.summary.integrated.finite_lufs().unwrap();
         let expected = -19.99903532982239_f64;
-        assert!((actual - expected).abs() <= 2.0e-13, "{actual:?} != {expected:?}");
+        assert!(
+            (actual - expected).abs() <= 2.0e-13,
+            "{actual:?} != {expected:?}"
+        );
     }
 
     #[test]
@@ -1582,9 +1801,7 @@ mod tests {
         let mut state = 0x1234_5678_u32;
         let mut pcm = Vec::with_capacity(FRAMES * 2);
         for n in 0..FRAMES {
-            state = state
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let mut sample = ((state >> 16) & 0xffff) as i32 - 32_768;
             if n < RATE as usize {
                 sample /= 16;
@@ -1592,7 +1809,10 @@ mod tests {
                 sample /= 4;
             }
             let right = if n % 7 == 0 { sample } else { -sample / 2 };
-            pcm.extend([f64::from(sample) * S16_TEST_SCALE, f64::from(right) * S16_TEST_SCALE]);
+            pcm.extend([
+                f64::from(sample) * S16_TEST_SCALE,
+                f64::from(right) * S16_TEST_SCALE,
+            ]);
         }
 
         let mut meter = LoudnessMeter::libebur128_126_default_layout(RATE, 2).unwrap();
@@ -1611,12 +1831,15 @@ mod tests {
         meter.push_interleaved(&pcm).unwrap();
         let result = meter.finalize().unwrap();
         assert_eq!(result.summary.real_frames, 4 * 48_000);
-        assert_eq!(result.summary.integrated, integrated_from_absolute_energies(
-            &result.statistics.integrated_energies,
-            LoudnessProfile::NativeEbu2023,
-            4 * 48_000,
-            19_200,
-        ));
+        assert_eq!(
+            result.summary.integrated,
+            integrated_from_absolute_energies(
+                &result.statistics.integrated_energies,
+                LoudnessProfile::NativeEbu2023,
+                4 * 48_000,
+                19_200,
+            )
+        );
         assert!(result.summary.absolute_lra_observations > 0);
     }
 
@@ -1628,7 +1851,9 @@ mod tests {
         ));
         assert!(matches!(
             LoudnessMeter::libebur128_126_default_layout(2_822_401, 2),
-            Err(LoudnessError::UnsupportedSampleRate { sample_rate_hz: 2_822_401 })
+            Err(LoudnessError::UnsupportedSampleRate {
+                sample_rate_hz: 2_822_401
+            })
         ));
         assert!(matches!(
             LoudnessMeter::libebur128_126_default_layout(48_000, 65),
@@ -1697,7 +1922,9 @@ mod tests {
         let mut index = 0usize;
         while offset < pcm.len() {
             let samples = (frame_chunks[index % frame_chunks.len()] * 2).min(pcm.len() - offset);
-            split.push_interleaved(&pcm[offset..offset + samples]).unwrap();
+            split
+                .push_interleaved(&pcm[offset..offset + samples])
+                .unwrap();
             offset += samples;
             index += 1;
         }
@@ -1725,7 +1952,10 @@ mod tests {
                 .expect("album track");
         }
         let album = album.finalize().unwrap();
-        assert!(matches!(album.integrated, IntegratedLoudness::NoEligibleBlocks));
+        assert!(matches!(
+            album.integrated,
+            IntegratedLoudness::NoEligibleBlocks
+        ));
 
         let mut continuous = LoudnessMeter::libebur128_126_default_layout(48_000, 2).unwrap();
         continuous
@@ -1780,14 +2010,7 @@ mod tests {
         let fixed = 128usize;
         let mut history = values.capacity() * std::mem::size_of::<f64>();
         let old_capacity = values.capacity();
-        reserve_history_vector(
-            &mut values,
-            8,
-            fixed,
-            &mut history,
-            usize::MAX,
-        )
-        .unwrap();
+        reserve_history_vector(&mut values, 8, fixed, &mut history, usize::MAX).unwrap();
         assert!(values.capacity() >= 12);
         assert_eq!(
             history,
@@ -1797,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_limit_is_checked_before_large_ring_allocation() {
+    fn storage_limit_is_checked_before_fixed_buffer_allocation() {
         let error = LoudnessMeter::with_roles_and_limit(
             384_000,
             &[
@@ -1810,7 +2033,7 @@ mod tests {
                 ChannelRole::LeftBack,
                 ChannelRole::RightBack,
             ],
-            LoudnessProfile::NativeEbu2023,
+            LoudnessProfile::Libebur128126,
             1_000_000,
         )
         .unwrap_err();
@@ -1818,7 +2041,9 @@ mod tests {
     }
     fn mono_tone(rate: u32, frames: usize, amplitude: f64, start: usize) -> Vec<f64> {
         (start..start + frames)
-            .map(|n| amplitude * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / f64::from(rate)).sin())
+            .map(|n| {
+                amplitude * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / f64::from(rate)).sin()
+            })
             .collect()
     }
 
@@ -1839,8 +2064,16 @@ mod tests {
 
     #[test]
     fn pcm_validity_matrix_is_fail_closed_without_rejecting_finite_float_headroom() {
-        for profile in [LoudnessProfile::NativeEbu2023, LoudnessProfile::Libebur128126] {
-            let mut empty = LoudnessMeter::with_roles(48_000, &[ChannelRole::Left, ChannelRole::Right], profile).unwrap();
+        for profile in [
+            LoudnessProfile::NativeEbu2023,
+            LoudnessProfile::Libebur128126,
+        ] {
+            let mut empty = LoudnessMeter::with_roles(
+                48_000,
+                &[ChannelRole::Left, ChannelRole::Right],
+                profile,
+            )
+            .unwrap();
             empty.push_interleaved(&[]).unwrap();
             let result = empty.finalize().unwrap();
             assert_eq!(result.summary.real_frames, 0);
@@ -1850,7 +2083,10 @@ mod tests {
         let mut partial = LoudnessMeter::new(48_000, 2).unwrap();
         assert_eq!(
             partial.push_interleaved(&[0.0]),
-            Err(LoudnessError::IncompleteFrame { samples: 1, channels: 2 }),
+            Err(LoudnessError::IncompleteFrame {
+                samples: 1,
+                channels: 2
+            }),
         );
         assert_eq!(partial.real_frames(), 0);
 
@@ -1864,15 +2100,26 @@ mod tests {
         }
 
         let mut headroom = LoudnessMeter::new(48_000, 2).unwrap();
-        headroom.push_interleaved(&tone(48_000, 19_200, 2.0, 0)).unwrap();
-        assert!(headroom.finalize().unwrap().summary.integrated.finite_lufs().is_some());
+        headroom
+            .push_interleaved(&tone(48_000, 19_200, 2.0, 0))
+            .unwrap();
+        assert!(headroom
+            .finalize()
+            .unwrap()
+            .summary
+            .integrated
+            .finite_lufs()
+            .is_some());
 
         let mut overflow = LoudnessMeter::new(48_000, 2).unwrap();
         assert!(matches!(
             overflow.push_interleaved(&[f64::MAX, f64::MAX]),
             Err(LoudnessError::NumericalRange)
         ));
-        assert_eq!(overflow.push_interleaved(&[0.0, 0.0]), Err(LoudnessError::MeterFailed));
+        assert_eq!(
+            overflow.push_interleaved(&[0.0, 0.0]),
+            Err(LoudnessError::MeterFailed)
+        );
     }
 
     #[test]
@@ -1880,13 +2127,21 @@ mod tests {
     #[allow(deprecated)]
     fn loudness_subnormal_stream_is_stable_with_daz_and_ftz_enabled() {
         #[cfg(target_arch = "x86")]
-        unsafe fn read_mxcsr() -> u32 { core::arch::x86::_mm_getcsr() }
+        unsafe fn read_mxcsr() -> u32 {
+            core::arch::x86::_mm_getcsr()
+        }
         #[cfg(target_arch = "x86_64")]
-        unsafe fn read_mxcsr() -> u32 { core::arch::x86_64::_mm_getcsr() }
+        unsafe fn read_mxcsr() -> u32 {
+            core::arch::x86_64::_mm_getcsr()
+        }
         #[cfg(target_arch = "x86")]
-        unsafe fn write_mxcsr(value: u32) { core::arch::x86::_mm_setcsr(value); }
+        unsafe fn write_mxcsr(value: u32) {
+            core::arch::x86::_mm_setcsr(value);
+        }
         #[cfg(target_arch = "x86_64")]
-        unsafe fn write_mxcsr(value: u32) { core::arch::x86_64::_mm_setcsr(value); }
+        unsafe fn write_mxcsr(value: u32) {
+            core::arch::x86_64::_mm_setcsr(value);
+        }
         std::thread::spawn(|| {
             const DAZ_FTZ: u32 = (1 << 6) | (1 << 15);
             let original = unsafe { read_mxcsr() };
@@ -1899,7 +2154,10 @@ mod tests {
             let result = meter.finalize().unwrap();
             unsafe { write_mxcsr(original) };
             assert_eq!(result.summary.real_frames, 19_200);
-            assert_eq!(result.summary.integrated, IntegratedLoudness::BelowAbsoluteGate);
+            assert_eq!(
+                result.summary.integrated,
+                IntegratedLoudness::BelowAbsoluteGate
+            );
         })
         .join()
         .expect("DAZ/FTZ loudness test thread");
@@ -1910,13 +2168,28 @@ mod tests {
         let mono_pcm = mono_tone(48_000, 48_000, 0.1, 0);
         let mut mono = LoudnessMeter::new(48_000, 1).unwrap();
         mono.push_interleaved(&mono_pcm).unwrap();
-        let mono = mono.finalize().unwrap().summary.integrated.finite_lufs().unwrap();
+        let mono = mono
+            .finalize()
+            .unwrap()
+            .summary
+            .integrated
+            .finite_lufs()
+            .unwrap();
 
-        let stereo_pcm: Vec<f64> = mono_pcm.iter().flat_map(|sample| [*sample, *sample]).collect();
+        let stereo_pcm: Vec<f64> = mono_pcm
+            .iter()
+            .flat_map(|sample| [*sample, *sample])
+            .collect();
         let mut stereo = LoudnessMeter::new(48_000, 2).unwrap();
         assert_eq!(stereo.roles(), &[ChannelRole::Left, ChannelRole::Right]);
         stereo.push_interleaved(&stereo_pcm).unwrap();
-        let stereo = stereo.finalize().unwrap().summary.integrated.finite_lufs().unwrap();
+        let stereo = stereo
+            .finalize()
+            .unwrap()
+            .summary
+            .integrated
+            .finite_lufs()
+            .unwrap();
 
         let expected_delta = 10.0 * 2.0_f64.log10();
         assert!(((stereo - mono) - expected_delta).abs() <= 2.0e-12);
@@ -1946,10 +2219,11 @@ mod tests {
         for active in 0..channels {
             let mut pcm = vec![0.0; frames * channels];
             for n in 0..frames {
-                pcm[n * channels + active] = 0.1
-                    * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / 48_000.0).sin();
+                pcm[n * channels + active] =
+                    0.1 * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / 48_000.0).sin();
             }
-            let mut meter = LoudnessMeter::with_roles(48_000, &roles, LoudnessProfile::NativeEbu2023).unwrap();
+            let mut meter =
+                LoudnessMeter::with_roles(48_000, &roles, LoudnessProfile::NativeEbu2023).unwrap();
             meter.push_interleaved(&pcm).unwrap();
             let measurement = meter.finalize().unwrap();
             energies.push(measurement.statistics.integrated_energies.first().copied());
@@ -1964,25 +2238,56 @@ mod tests {
 
         let mut lfe_pcm = vec![0.0; frames * channels];
         for n in 0..frames {
-            lfe_pcm[n * channels + 3] = 0.25
-                * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / 48_000.0).sin();
+            lfe_pcm[n * channels + 3] =
+                0.25 * (2.0 * std::f64::consts::PI * 997.0 * n as f64 / 48_000.0).sin();
         }
         let mut peak = crate::ReportingPeakMeter::new(48_000, channels).unwrap();
         peak.push_interleaved(&lfe_pcm).unwrap();
         let peak = peak.finalize().unwrap();
-        assert!(peak.channel_linear_peaks[3] >= 0.24, "excluded loudness channel lost reporting peak");
+        assert!(
+            peak.channel_linear_peaks[3] >= 0.24,
+            "excluded loudness channel lost reporting peak"
+        );
     }
 
     #[test]
     fn legacy_default_layout_matrix_covers_four_five_six_and_eight_channels() {
         let fixtures: &[&[ChannelRole]] = &[
-            &[ChannelRole::Left, ChannelRole::Right, ChannelRole::LeftSurround, ChannelRole::RightSurround],
-            &[ChannelRole::Left, ChannelRole::Right, ChannelRole::Center, ChannelRole::LeftSurround, ChannelRole::RightSurround],
-            &[ChannelRole::Left, ChannelRole::Right, ChannelRole::Center, ChannelRole::Unused, ChannelRole::LeftSurround, ChannelRole::RightSurround],
-            &[ChannelRole::Left, ChannelRole::Right, ChannelRole::Center, ChannelRole::Unused, ChannelRole::LeftSurround, ChannelRole::RightSurround, ChannelRole::Unused, ChannelRole::Unused],
+            &[
+                ChannelRole::Left,
+                ChannelRole::Right,
+                ChannelRole::LeftSurround,
+                ChannelRole::RightSurround,
+            ],
+            &[
+                ChannelRole::Left,
+                ChannelRole::Right,
+                ChannelRole::Center,
+                ChannelRole::LeftSurround,
+                ChannelRole::RightSurround,
+            ],
+            &[
+                ChannelRole::Left,
+                ChannelRole::Right,
+                ChannelRole::Center,
+                ChannelRole::Unused,
+                ChannelRole::LeftSurround,
+                ChannelRole::RightSurround,
+            ],
+            &[
+                ChannelRole::Left,
+                ChannelRole::Right,
+                ChannelRole::Center,
+                ChannelRole::Unused,
+                ChannelRole::LeftSurround,
+                ChannelRole::RightSurround,
+                ChannelRole::Unused,
+                ChannelRole::Unused,
+            ],
         ];
         for expected in fixtures {
-            let meter = LoudnessMeter::libebur128_126_default_layout(48_000, expected.len()).unwrap();
+            let meter =
+                LoudnessMeter::libebur128_126_default_layout(48_000, expected.len()).unwrap();
             assert_eq!(meter.roles(), *expected);
         }
     }
@@ -2027,7 +2332,8 @@ mod tests {
             pcm
         }
         fn measure(roles: &[ChannelRole], pcm: &[f64]) -> LoudnessMeasurement {
-            let mut meter = LoudnessMeter::with_roles(48_000, roles, LoudnessProfile::NativeEbu2023).unwrap();
+            let mut meter =
+                LoudnessMeter::with_roles(48_000, roles, LoudnessProfile::NativeEbu2023).unwrap();
             meter.push_interleaved(pcm).unwrap();
             meter.finalize().unwrap()
         }
@@ -2036,9 +2342,18 @@ mod tests {
         let b = measure(&permuted, &render(&permuted, 4 * 48_000));
         let a_lufs = a.summary.integrated.finite_lufs().unwrap();
         let b_lufs = b.summary.integrated.finite_lufs().unwrap();
-        assert!((a_lufs - b_lufs).abs() <= 2.0e-12, "permutation changed loudness: {a_lufs} vs {b_lufs}");
-        assert_eq!(a.statistics.integrated_observations(), b.statistics.integrated_observations());
-        assert_eq!(a.statistics.lra_observations(), b.statistics.lra_observations());
+        assert!(
+            (a_lufs - b_lufs).abs() <= 2.0e-12,
+            "permutation changed loudness: {a_lufs} vs {b_lufs}"
+        );
+        assert_eq!(
+            a.statistics.integrated_observations(),
+            b.statistics.integrated_observations()
+        );
+        assert_eq!(
+            a.statistics.lra_observations(),
+            b.statistics.lra_observations()
+        );
     }
 
     #[test]
@@ -2051,7 +2366,9 @@ mod tests {
             while offset < pcm.len() {
                 let requested = chunks[index % chunks.len()] * 2;
                 let count = requested.min(pcm.len() - offset);
-                meter.push_interleaved(&pcm[offset..offset + count]).unwrap();
+                meter
+                    .push_interleaved(&pcm[offset..offset + count])
+                    .unwrap();
                 offset += count;
                 index += 1;
             }
@@ -2065,7 +2382,10 @@ mod tests {
         for other in [&framewise, &partitioned, &repeated] {
             assert_eq!(whole.summary.integrated, other.summary.integrated);
             assert_eq!(whole.summary.range, other.summary.range);
-            assert_eq!(whole.statistics.integrated_energies, other.statistics.integrated_energies);
+            assert_eq!(
+                whole.statistics.integrated_energies,
+                other.statistics.integrated_energies
+            );
             assert_eq!(whole.statistics.lra_energies, other.statistics.lra_energies);
         }
     }
@@ -2073,38 +2393,72 @@ mod tests {
     #[test]
     fn album_matrix_covers_mixed_rates_levels_silence_gate_and_peak_only_tracks() {
         let mut mixed = AlbumLoudnessBuilder::new(DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES);
-        for (rate, frames, amplitude, peak) in [(44_100, 44_100, 0.05, 0.05), (48_000, 96_000, 0.2, 0.2)] {
+        for (rate, frames, amplitude, peak) in
+            [(44_100, 44_100, 0.05, 0.05), (48_000, 96_000, 0.2, 0.2)]
+        {
             let mut meter = LoudnessMeter::libebur128_126_default_layout(rate, 2).unwrap();
-            meter.push_interleaved(&tone(rate, frames, amplitude, 0)).unwrap();
-            mixed.push_track(meter.finalize().unwrap().statistics, peak).unwrap();
+            meter
+                .push_interleaved(&tone(rate, frames, amplitude, 0))
+                .unwrap();
+            mixed
+                .push_track(meter.finalize().unwrap().statistics, peak)
+                .unwrap();
         }
         let mixed = mixed.finalize().unwrap();
         assert_eq!(mixed.track_count, 2);
         assert!(mixed.integrated.finite_lufs().is_some());
         assert_eq!(mixed.reporting_peak_linear, 0.2);
 
-        let mut silent_plus_active = AlbumLoudnessBuilder::new(DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES);
+        let mut silent_plus_active =
+            AlbumLoudnessBuilder::new(DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES);
         let mut silent = LoudnessMeter::libebur128_126_default_layout(48_000, 2).unwrap();
         silent.push_interleaved(&vec![0.0; 48_000 * 2]).unwrap();
         let silent = silent.finalize().unwrap();
         assert!(silent.summary.integrated.finite_lufs().is_none());
-        silent_plus_active.push_track(silent.statistics, 0.9).unwrap();
+        silent_plus_active
+            .push_track(silent.statistics, 0.9)
+            .unwrap();
         let mut active = LoudnessMeter::libebur128_126_default_layout(48_000, 2).unwrap();
-        active.push_interleaved(&tone(48_000, 48_000, 0.1, 0)).unwrap();
-        silent_plus_active.push_track(active.finalize().unwrap().statistics, 0.1).unwrap();
+        active
+            .push_interleaved(&tone(48_000, 48_000, 0.1, 0))
+            .unwrap();
+        silent_plus_active
+            .push_track(active.finalize().unwrap().statistics, 0.1)
+            .unwrap();
         let album = silent_plus_active.finalize().unwrap();
         assert!(album.integrated.finite_lufs().is_some());
-        assert_eq!(album.reporting_peak_linear, 0.9, "peak from loudness-unavailable track was lost");
+        assert_eq!(
+            album.reporting_peak_linear, 0.9,
+            "peak from loudness-unavailable track was lost"
+        );
 
         let mut cross_track_gate = AlbumLoudnessBuilder::new(DEFAULT_LOUDNESS_STORAGE_LIMIT_BYTES);
-        cross_track_gate.push_track(artificial_statistics(LoudnessProfile::Libebur128126, &[1.0], &[], 48_000), 0.1).unwrap();
-        cross_track_gate.push_track(artificial_statistics(LoudnessProfile::Libebur128126, &[100.0], &[], 48_000), 0.2).unwrap();
+        cross_track_gate
+            .push_track(
+                artificial_statistics(LoudnessProfile::Libebur128126, &[1.0], &[], 48_000),
+                0.1,
+            )
+            .unwrap();
+        cross_track_gate
+            .push_track(
+                artificial_statistics(LoudnessProfile::Libebur128126, &[100.0], &[], 48_000),
+                0.2,
+            )
+            .unwrap();
         let album = cross_track_gate.finalize().unwrap();
-        let IntegratedLoudness::Finite { absolute_observations, relative_observations, .. } = album.integrated else {
+        let IntegratedLoudness::Finite {
+            absolute_observations,
+            relative_observations,
+            ..
+        } = album.integrated
+        else {
             panic!("cross-track gate should remain finite");
         };
         assert_eq!(absolute_observations, 2);
-        assert_eq!(relative_observations, 1, "album relative gate did not re-evaluate pooled track observations");
+        assert_eq!(
+            relative_observations, 1,
+            "album relative gate did not re-evaluate pooled track observations"
+        );
     }
 
     #[test]
@@ -2117,7 +2471,11 @@ mod tests {
         let result = meter.finalize().unwrap();
         assert_eq!(result.summary.real_frames, frames as u64);
         assert_eq!(result.statistics.integrated_energies, integrated_before);
-        assert_eq!(result.statistics.lra_observations(), 1, "1.5 s real + 1.5 s virtual tail must hit exactly one 3 s LRA boundary");
+        assert_eq!(
+            result.statistics.lra_observations(),
+            1,
+            "1.5 s real + 1.5 s virtual tail must hit exactly one 3 s LRA boundary"
+        );
 
         let mut peak = crate::ReportingPeakMeter::new(48_000, 2).unwrap();
         peak.push_interleaved(&pcm).unwrap();
@@ -2126,8 +2484,13 @@ mod tests {
         assert!(peak.channel_linear_peaks.iter().all(|value| *value > 0.0));
 
         let mut one_short = LoudnessMeter::new(48_000, 2).unwrap();
-        one_short.push_interleaved(&tone(48_000, frames - 1, 0.1, 0)).unwrap();
-        assert_eq!(one_short.finalize().unwrap().statistics.lra_observations(), 0);
+        one_short
+            .push_interleaved(&tone(48_000, frames - 1, 0.1, 0))
+            .unwrap();
+        assert_eq!(
+            one_short.finalize().unwrap().statistics.lra_observations(),
+            0
+        );
     }
 
     fn native_meter_with_demand(
@@ -2171,16 +2534,10 @@ mod tests {
             ]);
         }
 
-        let mut full = native_meter_with_demand(
-            RATE,
-            &roles,
-            LoudnessMetricDemand::IntegratedAndRange,
-        );
-        let mut reduced = native_meter_with_demand(
-            RATE,
-            &roles,
-            LoudnessMetricDemand::IntegratedOnly,
-        );
+        let mut full =
+            native_meter_with_demand(RATE, &roles, LoudnessMetricDemand::IntegratedAndRange);
+        let mut reduced =
+            native_meter_with_demand(RATE, &roles, LoudnessMetricDemand::IntegratedOnly);
         let pattern = [1usize, 37, 4_411, 2, 8_903, 113, 7, 2_047];
         let mut offset_frames = 0usize;
         let mut chunk_index = 0usize;
@@ -2275,7 +2632,10 @@ mod tests {
         let full = full_meter.finalize().unwrap();
         subset_builder.push_track(full.statistics, 0.25).unwrap();
         let subset = subset_builder.finalize().unwrap();
-        assert_eq!(subset.metric_coverage, LoudnessMetricCoverage::IntegratedOnly);
+        assert_eq!(
+            subset.metric_coverage,
+            LoudnessMetricCoverage::IntegratedOnly
+        );
         assert_eq!(subset.range, LoudnessRange::NotRequested);
         assert_eq!(subset.track_count, 2);
         assert_eq!(subset.reporting_peak_linear.to_bits(), 0.9_f64.to_bits());
@@ -2306,21 +2666,16 @@ mod tests {
     }
 
     #[test]
-    fn perf08_integrated_only_ring_and_history_use_the_reduced_resource_geometry() {
+    fn perf08_integrated_only_cells_and_history_use_the_reduced_resource_geometry() {
         let roles = [ChannelRole::Left, ChannelRole::Right];
-        let full = LoudnessMeter::with_roles(
-            48_000,
-            &roles,
-            LoudnessProfile::NativeEbu2023,
-        )
-        .unwrap();
-        let reduced = native_meter_with_demand(
-            48_000,
-            &roles,
-            LoudnessMetricDemand::IntegratedOnly,
-        );
-        assert_eq!(full.ring_frames, 144_000);
-        assert_eq!(reduced.ring_frames, 19_200);
+        let full =
+            LoudnessMeter::with_roles(48_000, &roles, LoudnessProfile::NativeEbu2023).unwrap();
+        let reduced =
+            native_meter_with_demand(48_000, &roles, LoudnessMetricDemand::IntegratedOnly);
+        assert_eq!(full.ring_frames, 1);
+        assert_eq!(reduced.ring_frames, 1);
+        assert!(full.cells.is_some() && reduced.cells.is_some());
+        assert!(full.fixed_storage_bytes < 16_384);
         assert!(reduced.fixed_storage_bytes < full.fixed_storage_bytes);
 
         let exact_reduced_limit = reduced.fixed_storage_bytes;
@@ -2478,12 +2833,9 @@ mod tests {
         )
         .unwrap();
 
-        let native_mono = LoudnessMeter::with_roles(
-            48_000,
-            &[ChannelRole::Mono],
-            LoudnessProfile::NativeEbu2023,
-        )
-        .unwrap();
+        let native_mono =
+            LoudnessMeter::with_roles(48_000, &[ChannelRole::Mono], LoudnessProfile::NativeEbu2023)
+                .unwrap();
 
         let native_quad = LoudnessMeter::with_roles(
             48_000,
@@ -2507,10 +2859,7 @@ mod tests {
         }
         assert!(compatibility_default.simd_backend.is_scalar());
         assert!(compatibility_roles.simd_backend.is_scalar());
-        assert_eq!(
-            simd::Backend::sse2_if_available().is_some(),
-            sse2_available
-        );
+        assert_eq!(simd::Backend::sse2_if_available().is_some(), sse2_available);
 
         if let Some(avx) = simd::Backend::avx_if_available() {
             assert_ne!(native.simd_backend, avx);
@@ -2577,7 +2926,10 @@ mod tests {
         .into_iter()
         .flatten()
         {
-            for profile in [LoudnessProfile::NativeEbu2023, LoudnessProfile::Libebur128126] {
+            for profile in [
+                LoudnessProfile::NativeEbu2023,
+                LoudnessProfile::Libebur128126,
+            ] {
                 let roles = if profile == LoudnessProfile::NativeEbu2023 {
                     vec![
                         ChannelRole::Left,
@@ -2596,6 +2948,9 @@ mod tests {
                     ]
                 };
                 let mut meter = LoudnessMeter::with_roles(48_000, &roles, profile).unwrap();
+                if profile == LoudnessProfile::NativeEbu2023 {
+                    meter.use_native_reference_ring();
+                }
                 meter.write_frame = 13;
                 for (index, sample) in meter.ring.iter_mut().enumerate() {
                     *sample = match index % 17 {
@@ -2662,14 +3017,7 @@ mod tests {
                     spans,
                     &mut scalar,
                 );
-                simd::window_channel_sums(
-                    backend,
-                    &ring,
-                    channels,
-                    &weights,
-                    spans,
-                    &mut vector,
-                );
+                simd::window_channel_sums(backend, &ring, channels, &weights, spans, &mut vector);
                 assert_bits_eq(&scalar[..channels], &vector[..channels]);
                 assert_eq!(scalar[3].to_bits(), 0.0_f64.to_bits());
                 assert_eq!(vector[3].to_bits(), 0.0_f64.to_bits());
@@ -2707,7 +3055,9 @@ mod tests {
         let mut pcm = Vec::with_capacity(frames * roles.len());
         for n in 0..frames {
             for channel in 0..roles.len() {
-                pcm.push(((n * (channel + 5)) as f64 * 0.0097).sin() * (0.05 + channel as f64 * 0.01));
+                pcm.push(
+                    ((n * (channel + 5)) as f64 * 0.0097).sin() * (0.05 + channel as f64 * 0.01),
+                );
             }
         }
         for demand in [
@@ -2732,7 +3082,10 @@ mod tests {
                 chunk_index += 1;
             }
             assert_bits_eq(&scalar.ring, &vector.ring);
-            assert_bits_eq(&scalar.fidelity.as_ref().unwrap().states, &vector.fidelity.as_ref().unwrap().states);
+            assert_bits_eq(
+                &scalar.fidelity.as_ref().unwrap().states,
+                &vector.fidelity.as_ref().unwrap().states,
+            );
             for (left, right) in scalar.filters.iter().zip(&vector.filters) {
                 assert_bits_eq(&left.delay, &right.delay);
             }
@@ -2746,7 +3099,10 @@ mod tests {
                 &scalar.statistics.integrated_energies,
                 &vector.statistics.integrated_energies,
             );
-            assert_bits_eq(&scalar.statistics.lra_energies, &vector.statistics.lra_energies);
+            assert_bits_eq(
+                &scalar.statistics.lra_energies,
+                &vector.statistics.lra_energies,
+            );
         }
     }
 
@@ -2842,12 +3198,15 @@ mod tests {
                     .iter()
                     .zip(&vector_out)
                     .all(|(left, right)| left.to_bits() == right.to_bits());
-                equal &= scalar_states.iter().zip(&vector_states).all(|(left, right)| {
-                    left.delay
-                        .iter()
-                        .zip(right.delay.iter())
-                        .all(|(left, right)| left.to_bits() == right.to_bits())
-                });
+                equal &= scalar_states
+                    .iter()
+                    .zip(&vector_states)
+                    .all(|(left, right)| {
+                        left.delay
+                            .iter()
+                            .zip(right.delay.iter())
+                            .all(|(left, right)| left.to_bits() == right.to_bits())
+                    });
             }
 
             unsafe { write_mxcsr(original) };
@@ -2877,12 +3236,8 @@ mod tests {
         }
 
         let observe = |backend: simd::Backend| {
-            let mut meter = LoudnessMeter::with_roles(
-                48_000,
-                &roles,
-                LoudnessProfile::NativeEbu2023,
-            )
-            .unwrap();
+            let mut meter =
+                LoudnessMeter::with_roles(48_000, &roles, LoudnessProfile::NativeEbu2023).unwrap();
             meter.simd_backend = backend;
             let pattern = [37usize, 1, 4_799, 503, 8_003];
             let mut offset = 0usize;
@@ -2909,7 +3264,10 @@ mod tests {
             &first.statistics.integrated_energies,
             &second.statistics.integrated_energies,
         );
-        assert_bits_eq(&first.statistics.lra_energies, &second.statistics.lra_energies);
+        assert_bits_eq(
+            &first.statistics.lra_energies,
+            &second.statistics.lra_energies,
+        );
     }
 
     #[test]
@@ -2920,12 +3278,8 @@ mod tests {
             return;
         }
         let roles = [ChannelRole::Left, ChannelRole::Right, ChannelRole::Center];
-        let mut probe = LoudnessMeter::with_roles(
-            48_000,
-            &roles,
-            LoudnessProfile::NativeEbu2023,
-        )
-        .unwrap();
+        let mut probe =
+            LoudnessMeter::with_roles(48_000, &roles, LoudnessProfile::NativeEbu2023).unwrap();
         let fixed_storage_bytes = probe.fixed_storage_bytes;
 
         let frames = 72_000usize;
@@ -2976,7 +3330,10 @@ mod tests {
         .unwrap();
         vector.simd_backend = backend;
         assert_eq!(scalar.fixed_storage_bytes, vector.fixed_storage_bytes);
-        assert_eq!(scalar.retained_storage_bytes(), vector.retained_storage_bytes());
+        assert_eq!(
+            scalar.retained_storage_bytes(),
+            vector.retained_storage_bytes()
+        );
 
         let mut offset = 0usize;
         let mut part = 0usize;
@@ -2990,7 +3347,10 @@ mod tests {
             offset += count;
             part += 1;
         }
-        assert_eq!(scalar.retained_storage_bytes(), vector.retained_storage_bytes());
+        assert_eq!(
+            scalar.retained_storage_bytes(),
+            vector.retained_storage_bytes()
+        );
         let scalar = scalar.finalize().unwrap();
         let vector = vector.finalize().unwrap();
         assert_eq!(scalar.summary.integrated, vector.summary.integrated);
@@ -3010,5 +3370,10 @@ mod tests {
             Err(LoudnessError::ResourceLimit { .. })
         ));
     }
-
 }
+
+#[cfg(test)]
+mod block_energy_experiment;
+
+#[cfg(test)]
+mod energy_cells_tests;

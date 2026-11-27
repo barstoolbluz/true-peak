@@ -148,7 +148,6 @@ pub fn calculate_row(
     })
 }
 
-#[must_use]
 pub fn would_clip(
     measurement: Loudgain068Measurement,
     reference_lufs: f64,
@@ -254,7 +253,9 @@ mod tests {
         let exact_half = formatting_row(-0.0, 0.1234564, 1.125);
         assert_eq!(exact_half.replaygain_gain_tag(), "-0.00 dB");
         assert_eq!(exact_half.replaygain_peak_tag(), "0.123456");
-        assert!(exact_half.format_tsv("x").contains("\t-0.00 LUFS\t1.12 dB\t"));
+        assert!(exact_half
+            .format_tsv("x")
+            .contains("\t-0.00 LUFS\t1.12 dB\t"));
 
         let below = formatting_row(0.0, 0.5, f64::from_bits(1.125_f64.to_bits() - 1));
         let above = formatting_row(0.0, 0.5, f64::from_bits(1.125_f64.to_bits() + 1));
@@ -269,7 +270,10 @@ mod tests {
 
     #[test]
     fn very_small_and_zero_peaks_have_stable_six_decimal_presentation() {
-        assert_eq!(formatting_row(0.0, 0.0000004, 0.0).replaygain_peak_tag(), "0.000000");
+        assert_eq!(
+            formatting_row(0.0, 0.0000004, 0.0).replaygain_peak_tag(),
+            "0.000000"
+        );
 
         let zero = calculate_row(
             Loudgain068Measurement {
@@ -303,7 +307,11 @@ mod tests {
             range_lu: 0.0,
             reporting_peak_linear: ceiling * 1.01,
         };
-        assert!(calculate_row(track_over, Loudgain068Options::default(), false).unwrap().will_clip);
+        assert!(
+            calculate_row(track_over, Loudgain068Options::default(), false)
+                .unwrap()
+                .will_clip
+        );
 
         let quiet_track = Loudgain068Measurement {
             loudness_lufs: ORDINARY_REFERENCE_LUFS,
@@ -329,5 +337,4 @@ mod tests {
         assert_eq!(row.replaygain_peak_tag(), "0.123456");
         assert!(row.format_tsv("x").contains("\t1.23 dB\t"));
     }
-
 }

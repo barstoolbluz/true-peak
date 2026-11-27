@@ -7,9 +7,7 @@ pub(super) const ABSOLUTE_GATE_ENERGY: f64 = 1.1724653045822981e-7;
 #[inline]
 pub(super) fn energy_to_lufs(energy: f64, profile: LoudnessProfile) -> f64 {
     match profile {
-        LoudnessProfile::Libebur128126 => {
-            -0.691 + 10.0 * (energy.ln() / std::f64::consts::LN_10)
-        }
+        LoudnessProfile::Libebur128126 => -0.691 + 10.0 * (energy.ln() / std::f64::consts::LN_10),
         LoudnessProfile::NativeEbu2023 => -0.691 + 10.0 * energy.log10(),
     }
 }
@@ -24,6 +22,22 @@ pub(super) fn passes_integrated_gate(
         LoudnessProfile::Libebur128126 => energy >= threshold,
         LoudnessProfile::NativeEbu2023 => energy > threshold,
     }
+}
+
+// A long population of individually finite positive window energies can
+// overflow its unnormalized sum even though the mean is representable.
+// Only native overflow takes this scaled fallback; normal and compatibility
+// arithmetic retain their existing operation order and gate boundaries.
+fn scaled_positive_mean(energies: &[f64], above: Option<f64>, count: usize) -> f64 {
+    let eligible = || {
+        energies
+            .iter()
+            .copied()
+            .filter(move |energy| above.is_none_or(|threshold| *energy > threshold))
+    };
+    let scale = eligible().fold(0.0_f64, f64::max);
+    let normalized_sum: f64 = eligible().map(|energy| energy / scale).sum();
+    (normalized_sum / count as f64) * scale
 }
 
 pub(super) fn integrated_from_absolute_energies(
@@ -49,7 +63,11 @@ pub(super) fn integrated_from_absolute_energies(
     for &energy in energies {
         absolute_sum += energy;
     }
-    let absolute_mean = absolute_sum / energies.len() as f64;
+    let absolute_mean = if profile == LoudnessProfile::NativeEbu2023 && !absolute_sum.is_finite() {
+        scaled_positive_mean(energies, None, energies.len())
+    } else {
+        absolute_sum / energies.len() as f64
+    };
     let relative_threshold = absolute_mean * 0.1;
 
     let mut gated_sum = 0.0;
@@ -63,7 +81,11 @@ pub(super) fn integrated_from_absolute_energies(
     if gated_count == 0 {
         return IntegratedLoudness::BelowRelativeGate;
     }
-    let mean = gated_sum / gated_count as f64;
+    let mean = if profile == LoudnessProfile::NativeEbu2023 && !gated_sum.is_finite() {
+        scaled_positive_mean(energies, Some(relative_threshold), gated_count)
+    } else {
+        gated_sum / gated_count as f64
+    };
     let lufs = energy_to_lufs(mean, profile);
     if lufs.is_finite() {
         IntegratedLoudness::Finite {
@@ -77,9 +99,7 @@ pub(super) fn integrated_from_absolute_energies(
 }
 
 pub(super) fn sort_lra_energies(energies: &mut [f64]) {
-    energies.sort_unstable_by(|left, right| {
-        left.partial_cmp(right).unwrap_or(Ordering::Equal)
-    });
+    energies.sort_unstable_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
 }
 
 pub(super) fn lra_from_sorted_absolute_energies(
@@ -96,7 +116,12 @@ pub(super) fn lra_from_sorted_absolute_energies(
     for &energy in energies {
         sum += energy;
     }
-    let threshold = (sum / energies.len() as f64) * 0.01;
+    let mean = if profile == LoudnessProfile::NativeEbu2023 && !sum.is_finite() {
+        scaled_positive_mean(energies, None, energies.len())
+    } else {
+        sum / energies.len() as f64
+    };
+    let threshold = mean * 0.01;
     let first = energies.partition_point(|energy| *energy < threshold);
     let gated = &energies[first..];
     if gated.is_empty() {
@@ -116,9 +141,7 @@ pub(super) fn lra_from_sorted_absolute_energies(
             // compatibility operation graph.
             energy_to_lufs(hi_energy, profile) - energy_to_lufs(lo_energy, profile)
         }
-        LoudnessProfile::NativeEbu2023 => {
-            10.0 * hi_energy.log10() - 10.0 * lo_energy.log10()
-        }
+        LoudnessProfile::NativeEbu2023 => 10.0 * hi_energy.log10() - 10.0 * lo_energy.log10(),
     };
     if lu.is_finite() {
         LoudnessRange::Finite {
@@ -137,9 +160,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn production_cells_finite_history_mean_survives_sum_overflow() {
+        // At 3364 Hz these energies are small enough for both individual
+        // integrated and 3 s channel sums to be finite, but a sufficiently
+        // long retained history overflows its unnormalized sum.
+        let mut energies = vec![1e304_f64; 20_000];
+        assert!(energies.iter().copied().sum::<f64>().is_infinite());
+        let profile = LoudnessProfile::NativeEbu2023;
+        let IntegratedLoudness::Finite {
+            lufs,
+            absolute_observations,
+            relative_observations,
+        } = integrated_from_absolute_energies(&energies, profile, 1, 0)
+        else {
+            panic!("finite mean misclassified after history overflow")
+        };
+        assert_eq!(
+            (absolute_observations, relative_observations),
+            (20_000, 20_000)
+        );
+        assert!((lufs - (-0.691 + 3040.0)).abs() < 1e-10);
+        assert_eq!(
+            lra_from_sorted_absolute_energies(&energies, profile),
+            LoudnessRange::Finite {
+                lu: 0.0,
+                observations: 20_000
+            }
+        );
+        energies.resize(40_000, 1e304);
+        energies[..20_000].fill(1e302);
+        // 1e302 is below the one-shot -10 LU threshold but above
+        // the -20 LU threshold. Both populations survive absolute gating.
+        let IntegratedLoudness::Finite {
+            lufs,
+            relative_observations,
+            ..
+        } = integrated_from_absolute_energies(&energies, profile, 1, 0)
+        else {
+            panic!("expected gated finite mean")
+        };
+        assert_eq!(relative_observations, 20_000);
+        assert!((lufs - (-0.691 + 10.0 * 1e304_f64.log10())).abs() < 1e-9);
+        let LoudnessRange::Finite { lu, observations } =
+            lra_from_sorted_absolute_energies(&energies, profile)
+        else {
+            panic!("expected finite range")
+        };
+        assert_eq!(observations, 40_000);
+        assert!((lu - 10.0 * 100.0_f64.log10()).abs() < 1e-10);
+    }
+
+    #[test]
     fn absolute_gate_constant_is_reference_value() {
         let independently_derived = 10.0_f64.powf((-70.0 + 0.691) / 10.0);
-        assert_eq!(ABSOLUTE_GATE_ENERGY.to_bits(), independently_derived.to_bits());
+        assert_eq!(
+            ABSOLUTE_GATE_ENERGY.to_bits(),
+            independently_derived.to_bits()
+        );
     }
 
     #[test]
@@ -161,10 +238,7 @@ mod tests {
     fn lra_uses_nearest_rank_not_interpolation() {
         let mut energies = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         sort_lra_energies(&mut energies);
-        let result = lra_from_sorted_absolute_energies(
-            &energies,
-            LoudnessProfile::NativeEbu2023,
-        );
+        let result = lra_from_sorted_absolute_energies(&energies, LoudnessProfile::NativeEbu2023);
         let LoudnessRange::Finite { lu, observations } = result else {
             panic!("expected finite LRA");
         };
@@ -185,13 +259,24 @@ mod tests {
     #[test]
     fn absolute_gate_boundary_matrix_is_profile_exact() {
         let threshold = ABSOLUTE_GATE_ENERGY;
-        for profile in [LoudnessProfile::Libebur128126, LoudnessProfile::NativeEbu2023] {
-            assert!(!passes_integrated_gate(previous_positive(threshold), threshold, profile));
+        for profile in [
+            LoudnessProfile::Libebur128126,
+            LoudnessProfile::NativeEbu2023,
+        ] {
+            assert!(!passes_integrated_gate(
+                previous_positive(threshold),
+                threshold,
+                profile
+            ));
             assert_eq!(
                 passes_integrated_gate(threshold, threshold, profile),
                 profile == LoudnessProfile::Libebur128126,
             );
-            assert!(passes_integrated_gate(next_positive(threshold), threshold, profile));
+            assert!(passes_integrated_gate(
+                next_positive(threshold),
+                threshold,
+                profile
+            ));
         }
     }
 
@@ -208,22 +293,39 @@ mod tests {
                 (LoudnessProfile::NativeEbu2023, expected.1),
             ] {
                 let result = integrated_from_absolute_energies(energies, profile, 1, 0);
-                let IntegratedLoudness::Finite { relative_observations, .. } = result else {
+                let IntegratedLoudness::Finite {
+                    relative_observations,
+                    ..
+                } = result
+                else {
                     panic!("expected finite integrated result for {energies:?} {profile:?}");
                 };
-                assert_eq!(relative_observations, expected_count, "{energies:?} {profile:?}");
+                assert_eq!(
+                    relative_observations, expected_count,
+                    "{energies:?} {profile:?}"
+                );
             }
         }
 
         // The first mean is 100, so the one-shot relative gate is 10.  A
         // recursive re-gate after dropping 9 would raise the threshold and
         // incorrectly drop 11 as well.
-        for profile in [LoudnessProfile::Libebur128126, LoudnessProfile::NativeEbu2023] {
+        for profile in [
+            LoudnessProfile::Libebur128126,
+            LoudnessProfile::NativeEbu2023,
+        ] {
             let result = integrated_from_absolute_energies(&[9.0, 11.0, 280.0], profile, 1, 0);
-            let IntegratedLoudness::Finite { relative_observations, .. } = result else {
+            let IntegratedLoudness::Finite {
+                relative_observations,
+                ..
+            } = result
+            else {
                 panic!("expected finite integrated result");
             };
-            assert_eq!(relative_observations, 2, "relative gate became recursive for {profile:?}");
+            assert_eq!(
+                relative_observations, 2,
+                "relative gate became recursive for {profile:?}"
+            );
         }
     }
 
@@ -234,7 +336,10 @@ mod tests {
         // silent sections before or after it: no zero-energy observation may
         // enter the relative-gate population.
         let active = [10.0, 90.0];
-        for profile in [LoudnessProfile::Libebur128126, LoudnessProfile::NativeEbu2023] {
+        for profile in [
+            LoudnessProfile::Libebur128126,
+            LoudnessProfile::NativeEbu2023,
+        ] {
             let baseline = integrated_from_absolute_energies(&active, profile, 1, 0);
             let repeated = integrated_from_absolute_energies(&active, profile, 10_000, 0);
             assert_eq!(baseline, repeated);
@@ -251,9 +356,16 @@ mod tests {
             (vec![1.5, 198.5], 2),
         ] {
             sort_lra_energies(&mut energies);
-            for profile in [LoudnessProfile::Libebur128126, LoudnessProfile::NativeEbu2023] {
+            for profile in [
+                LoudnessProfile::Libebur128126,
+                LoudnessProfile::NativeEbu2023,
+            ] {
                 let result = lra_from_sorted_absolute_energies(&energies, profile);
-                assert_eq!(result.observations(), expected_observations, "{energies:?} {profile:?}");
+                assert_eq!(
+                    result.observations(),
+                    expected_observations,
+                    "{energies:?} {profile:?}"
+                );
             }
         }
     }
@@ -269,18 +381,30 @@ mod tests {
             (&[100.0], 0, 0),
             (&[100.0, 101.0, 102.0, 103.0, 104.0], 0, 4),
             (&[100.0, 101.0, 102.0, 103.0, 104.0, 105.0], 1, 5),
-            (&[100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0], 1, 10),
+            (
+                &[
+                    100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0,
+                ],
+                1,
+                10,
+            ),
             (&[100.0, 100.0, 100.0, 200.0, 200.0, 200.0], 1, 5),
         ];
         for (energies, low, high) in fixtures {
-            for profile in [LoudnessProfile::Libebur128126, LoudnessProfile::NativeEbu2023] {
+            for profile in [
+                LoudnessProfile::Libebur128126,
+                LoudnessProfile::NativeEbu2023,
+            ] {
                 let result = lra_from_sorted_absolute_energies(energies, profile);
                 let LoudnessRange::Finite { lu, observations } = result else {
                     panic!("expected finite LRA for {energies:?}");
                 };
                 assert_eq!(observations, energies.len());
                 let expected = 10.0 * (energies[*high] / energies[*low]).log10();
-                assert!((lu - expected).abs() <= 5.0e-14, "{energies:?} {profile:?}: {lu:?} != {expected:?}");
+                assert!(
+                    (lu - expected).abs() <= 5.0e-14,
+                    "{energies:?} {profile:?}: {lu:?} != {expected:?}"
+                );
             }
         }
 
@@ -288,5 +412,4 @@ mod tests {
         sort_lra_energies(&mut unsorted);
         assert_eq!(unsorted, vec![100.0, 100.0, 125.0, 150.0, 200.0]);
     }
-
 }

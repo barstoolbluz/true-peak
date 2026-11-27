@@ -3,8 +3,14 @@ use true_peak::{
     TruePeakError, FAST_ALGORITHM_REVISION, FAST_WALL_NANOS_PER_PROGRAMME_MINUTE,
 };
 
-fn run_fast(samples: &[f64], sample_rate_hz: u32, channels: usize, edge: EdgePolicy) -> true_peak::PeakCertificate {
-    let mut meter = CertifiedPeakMeter::new(sample_rate_hz, channels, edge, PeakTier::Fast).unwrap();
+fn run_fast(
+    samples: &[f64],
+    sample_rate_hz: u32,
+    channels: usize,
+    edge: EdgePolicy,
+) -> true_peak::PeakCertificate {
+    let mut meter =
+        CertifiedPeakMeter::new(sample_rate_hz, channels, edge, PeakTier::Fast).unwrap();
     meter.push_interleaved(samples).unwrap();
     meter.finalize().unwrap()
 }
@@ -60,7 +66,10 @@ fn deterministic_noise(frames: usize, channels: usize) -> Vec<f64> {
 fn assert_fast_accuracy(certificate: &true_peak::PeakCertificate) {
     for (channel, interval) in certificate.channel_intervals.iter().copied().enumerate() {
         let width = interval.width_db().unwrap_or(0.0);
-        assert!(width <= 0.01 + 1.0e-12, "channel {channel} width {width:.12} dB");
+        assert!(
+            width <= 0.01 + 1.0e-12,
+            "channel {channel} width {width:.12} dB"
+        );
     }
 }
 
@@ -73,7 +82,9 @@ fn aligned_windowed_multitone(frames: usize, frequencies: &[f64]) -> Vec<f64> {
             let envelope = if half_span == 0.0 {
                 1.0
             } else {
-                (std::f64::consts::PI * relative / (2.0 * half_span)).cos().powi(2)
+                (std::f64::consts::PI * relative / (2.0 * half_span))
+                    .cos()
+                    .powi(2)
             };
             let carrier = frequencies
                 .iter()
@@ -93,10 +104,16 @@ fn fast066_public_contract_remains_frozen() {
 
     let samples = deterministic_noise(1025, 2);
     let certificate = run_fast(&samples, 192_000, 2, EdgePolicy::RepeatEndpoints);
-    assert_eq!(certificate.reconstruction, CertifiedReconstruction::Hq1024V1);
+    assert_eq!(
+        certificate.reconstruction,
+        CertifiedReconstruction::Hq1024V1
+    );
     assert_eq!(certificate.tier, PeakTier::Fast);
     assert_ne!(certificate.status, SearchStatus::TimeLimited);
-    assert_eq!(certificate.diagnostics.time_bounded_prefix_blocks_skipped, 0);
+    assert_eq!(
+        certificate.diagnostics.time_bounded_prefix_blocks_skipped,
+        0
+    );
     assert_eq!(certificate.diagnostics.time_limited_tiles, 0);
     assert_eq!(certificate.diagnostics.work_credits_consumed, 0);
     assert_eq!(certificate.diagnostics.work_limited_tiles, 0);
@@ -109,10 +126,22 @@ fn one_frame_target_is_exact_for_both_edge_policies() {
         let samples = [0.625, -0.25];
         let certificate = run_fast(&samples, 192_000, 2, edge);
         assert_eq!(certificate.status, SearchStatus::Complete);
-        assert_eq!(certificate.finite_interval.lower_linear.to_bits(), 0.625_f64.to_bits());
-        assert_eq!(certificate.finite_interval.upper_linear.to_bits(), 0.625_f64.to_bits());
-        assert_eq!(certificate.reported_point_estimate.channel_linear_peaks[0].to_bits(), 0.625_f64.to_bits());
-        assert_eq!(certificate.reported_point_estimate.channel_linear_peaks[1].to_bits(), 0.25_f64.to_bits());
+        assert_eq!(
+            certificate.finite_interval.lower_linear.to_bits(),
+            0.625_f64.to_bits()
+        );
+        assert_eq!(
+            certificate.finite_interval.upper_linear.to_bits(),
+            0.625_f64.to_bits()
+        );
+        assert_eq!(
+            certificate.reported_point_estimate.channel_linear_peaks[0].to_bits(),
+            0.625_f64.to_bits()
+        );
+        assert_eq!(
+            certificate.reported_point_estimate.channel_linear_peaks[1].to_bits(),
+            0.25_f64.to_bits()
+        );
         assert_eq!(certificate.diagnostics.fast_survey_knots, 2);
         assert_eq!(certificate.diagnostics.fast_flat_groups, 0);
     }
@@ -127,7 +156,10 @@ fn native_screen_avoids_physical_hq4_work_and_retired_optional_policy_stays_zero
     let certificate = run_fast(&samples, 192_000, 1, EdgePolicy::ZeroExtend);
     let d = certificate.diagnostics;
 
-    assert!(d.groups_rejected > 0, "fixture must exercise native-domain rejection");
+    assert!(
+        d.groups_rejected > 0,
+        "fixture must exercise native-domain rejection"
+    );
     assert!(d.fast_survey_knots < (4 * (FRAMES - 1) + 1) as u64);
     assert_eq!(d.fast_candidates_observed, 0);
     assert_eq!(d.fast_candidates_selected, 0);
@@ -150,16 +182,28 @@ fn native_screen_avoids_physical_hq4_work_and_retired_optional_policy_stays_zero
 fn rejected_nonfinite_and_incomplete_pushes_are_transactional() {
     let prefix = deterministic_noise(257, 2);
     let suffix = deterministic_noise(193, 2);
-    let mut expected = CertifiedPeakMeter::new(48_000, 2, EdgePolicy::ZeroExtend, PeakTier::Fast).unwrap();
+    let mut expected =
+        CertifiedPeakMeter::new(48_000, 2, EdgePolicy::ZeroExtend, PeakTier::Fast).unwrap();
     expected.push_interleaved(&prefix).unwrap();
 
     let mut nonfinite = expected.clone();
-    let error = nonfinite.push_interleaved(&[0.25, f64::NAN, 0.5, -0.5]).unwrap_err();
-    assert!(matches!(error, TruePeakError::NonFiniteSample { sample_index: 1 }));
+    let error = nonfinite
+        .push_interleaved(&[0.25, f64::NAN, 0.5, -0.5])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TruePeakError::NonFiniteSample { sample_index: 1 }
+    ));
 
     let mut incomplete = expected.clone();
     let error = incomplete.push_interleaved(&[0.25]).unwrap_err();
-    assert!(matches!(error, TruePeakError::IncompleteFrame { samples: 1, channels: 2 }));
+    assert!(matches!(
+        error,
+        TruePeakError::IncompleteFrame {
+            samples: 1,
+            channels: 2
+        }
+    ));
 
     expected.push_interleaved(&suffix).unwrap();
     nonfinite.push_interleaved(&suffix).unwrap();
@@ -175,9 +219,18 @@ fn signed_zero_input_remains_exact_digital_silence() {
     for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
         let certificate = run_fast(&samples, 48_000, 1, edge);
         assert_eq!(certificate.status, SearchStatus::Complete);
-        assert_eq!(certificate.finite_interval.lower_linear.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(certificate.finite_interval.upper_linear.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(certificate.reported_point_estimate.overall, PeakLevel::Silence);
+        assert_eq!(
+            certificate.finite_interval.lower_linear.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            certificate.finite_interval.upper_linear.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            certificate.reported_point_estimate.overall,
+            PeakLevel::Silence
+        );
     }
 }
 
@@ -187,29 +240,47 @@ fn subnormal_input_is_not_collapsed_to_digital_silence() {
     let certificate = run_fast(&[tiny, 0.0], 48_000, 1, EdgePolicy::ZeroExtend);
     assert!(certificate.finite_interval.lower_linear.to_bits() >= tiny.to_bits());
     assert!(certificate.finite_interval.upper_linear.to_bits() >= tiny.to_bits());
-    assert_eq!(certificate.diagnostics.fast_input_sample_peak_linear.to_bits(), tiny.to_bits());
-    assert_ne!(certificate.reported_point_estimate.overall, PeakLevel::Silence);
+    assert_eq!(
+        certificate
+            .diagnostics
+            .fast_input_sample_peak_linear
+            .to_bits(),
+        tiny.to_bits()
+    );
+    assert_ne!(
+        certificate.reported_point_estimate.overall,
+        PeakLevel::Silence
+    );
 }
 
 #[test]
 fn very_large_finite_input_fails_closed_after_scale_aware_resolution() {
     let huge = f64::MAX / 2.0;
-    let mut meter = CertifiedPeakMeter::new(48_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Fast).unwrap();
+    let mut meter =
+        CertifiedPeakMeter::new(48_000, 1, EdgePolicy::RepeatEndpoints, PeakTier::Fast).unwrap();
     meter.push_interleaved(&[huge, -huge, huge]).unwrap();
-    assert_eq!(meter.finalize().unwrap_err(), TruePeakError::NumericalOverflow);
+    assert_eq!(
+        meter.finalize().unwrap_err(),
+        TruePeakError::NumericalOverflow
+    );
 }
 
 #[test]
 fn fast_interval_contains_reference_point_and_meets_width_on_short_hostile_cases() {
     let mut cases = Vec::new();
     cases.push(vec![0.0, 0.9, -0.9, 0.2, -0.3, 0.7, -0.1]);
-    cases.push((0..33).map(|i| if i % 2 == 0 { 0.95 } else { -0.95 }).collect());
+    cases.push(
+        (0..33)
+            .map(|i| if i % 2 == 0 { 0.95 } else { -0.95 })
+            .collect(),
+    );
     cases.push(deterministic_noise(47, 1));
 
     for edge in [EdgePolicy::RepeatEndpoints, EdgePolicy::ZeroExtend] {
         for samples in &cases {
             let fast = run_fast(samples, 48_000, 1, edge);
-            let mut reference = CertifiedPeakMeter::new(48_000, 1, edge, PeakTier::Reference).unwrap();
+            let mut reference =
+                CertifiedPeakMeter::new(48_000, 1, edge, PeakTier::Reference).unwrap();
             reference.push_interleaved(samples).unwrap();
             let reference = reference.finalize().unwrap();
             let reference_point = finite_linear(reference.reported_point_estimate.overall);
@@ -278,7 +349,10 @@ fn channel_processing_is_independent_within_certificate_error() {
             "{label} channel certificates disagree across packing context: stereo={stereo_interval:?}, mono={mono_interval:?}",
         );
     }
-    assert!(stereo_result.diagnostics.dense_regions > 0, "fixture must exercise packed dense first-stage work");
+    assert!(
+        stereo_result.diagnostics.dense_regions > 0,
+        "fixture must exercise packed dense first-stage work"
+    );
     assert!(
         stereo_result.diagnostics.direct_rescore_evaluations > 0,
         "quiet channel must tighten packed-FFT uncertainty directly when needed",
@@ -305,14 +379,19 @@ fn mandatory_resolution_uses_live_generic_counters_not_retired_v2_counters() {
 fn bundled_recording_meets_accuracy_floor_and_contains_dense_hq1024_target() {
     const BYTES: &[u8] = include_bytes!("fixtures/real_reference_48k_stereo.f64le");
     let samples: Vec<f64> = BYTES
-        .chunks_exact(8)
-        .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
         .collect();
     let certificate = run_fast(&samples, 48_000, 2, EdgePolicy::RepeatEndpoints);
     let measured = finite_dbtp(certificate.reported_point_estimate.overall);
     let expected_dense_hq1024_dbtp = -0.112_284_234_518_646_16_f64;
     let expected_dense_hq1024_linear = 0.987_155_997_134_972_3_f64;
-    assert!((measured - expected_dense_hq1024_dbtp).abs() <= 0.01, "{measured}");
+    assert!(
+        (measured - expected_dense_hq1024_dbtp).abs() <= 0.01,
+        "{measured}"
+    );
     assert!(certificate.finite_interval.lower_linear <= expected_dense_hq1024_linear);
     assert!(certificate.finite_interval.upper_linear >= expected_dense_hq1024_linear);
     assert_fast_accuracy(&certificate);

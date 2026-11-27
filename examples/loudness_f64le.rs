@@ -11,7 +11,10 @@ use true_peak::ReportingPeakMeter;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 5 {
-        return Err("usage: loudness_f64le <path.f64le> <sample_rate_hz> <channels> <libebur128|native>".into());
+        return Err(
+            "usage: loudness_f64le <path.f64le> <sample_rate_hz> <channels> <libebur128|native>"
+                .into(),
+        );
     }
     let sample_rate: u32 = args[2].parse()?;
     let channels: usize = args[3].parse()?;
@@ -52,8 +55,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let count = usize::try_from(remaining.min(buffer_bytes as u64))?;
         file.read_exact(&mut bytes[..count])?;
         samples.clear();
-        for raw in bytes[..count].chunks_exact(8) {
-            samples.push(f64::from_le_bytes(raw.try_into().expect("8-byte f64")));
+        for raw in bytes[..count].as_chunks::<8>().0 {
+            samples.push(f64::from_le_bytes(*raw));
         }
         let t = std::time::Instant::now();
         meter.push_interleaved(&samples)?;
@@ -72,7 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     peak_nanos += t.elapsed().as_nanos();
     let lufs = m.summary.integrated.finite_lufs();
     let lra = m.summary.range.finite_lu();
-    let f = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_else(|| "null".to_string());
+    let f = |v: Option<f64>| {
+        v.map(|x| format!("{x:.6}"))
+            .unwrap_or_else(|| "null".to_string())
+    };
     let programme_s = m.summary.real_frames as f64 / f64::from(sample_rate);
     let meter_s = meter_nanos as f64 / 1e9;
     let peak_s = peak_nanos as f64 / 1e9;

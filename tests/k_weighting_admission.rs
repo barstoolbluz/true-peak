@@ -24,11 +24,27 @@ fn ordinary_native_rejects_sub_nyquist_rates() {
     for rate in [16, 3_000, 3_363] {
         assert_unsupported(LoudnessMeter::new(rate, 1), rate);
         assert_unsupported(LoudnessMeter::with_roles(rate, &MONO, NATIVE), rate);
-        assert_unsupported(LoudnessMeter::with_roles_and_limit(rate, &MONO, NATIVE, LIMIT), rate);
+        assert_unsupported(
+            LoudnessMeter::with_roles_and_limit(rate, &MONO, NATIVE, LIMIT),
+            rate,
+        );
         for demand in [FULL, INTEGRATED] {
-            assert_unsupported(LoudnessMeter::with_roles_and_metric_demand(rate, &MONO, NATIVE, demand), rate);
-            assert_unsupported(LoudnessMeter::with_roles_and_metric_demand_and_limit(rate, &MONO, NATIVE, demand, LIMIT), rate);
-            assert_unsupported(LoudnessMeter::with_roles_high_fidelity_and_metric_demand_and_limit(rate, &MONO, demand, LIMIT), rate);
+            assert_unsupported(
+                LoudnessMeter::with_roles_and_metric_demand(rate, &MONO, NATIVE, demand),
+                rate,
+            );
+            assert_unsupported(
+                LoudnessMeter::with_roles_and_metric_demand_and_limit(
+                    rate, &MONO, NATIVE, demand, LIMIT,
+                ),
+                rate,
+            );
+            assert_unsupported(
+                LoudnessMeter::with_roles_high_fidelity_and_metric_demand_and_limit(
+                    rate, &MONO, demand, LIMIT,
+                ),
+                rate,
+            );
         }
         assert_unsupported(LoudnessMeter::with_roles_high_fidelity(rate, &MONO), rate);
     }
@@ -36,21 +52,37 @@ fn ordinary_native_rejects_sub_nyquist_rates() {
 
 #[test]
 fn accepted_native_and_compatibility_boundaries() {
-    for rate in [3_364, 4_000, 7_999, 8_000, 44_101, 48_000, 768_001, 1_536_000, UPPER] {
+    for rate in [
+        3_364, 4_000, 7_999, 8_000, 44_101, 48_000, 768_001, 1_536_000, UPPER,
+    ] {
         assert!(LoudnessMeter::new(rate, 1).is_ok(), "native rate {rate}");
         assert!(LoudnessMeter::with_roles(rate, &MONO, NATIVE).is_ok());
-        assert!(LoudnessMeter::with_roles_and_metric_demand(rate, &MONO, NATIVE, INTEGRATED).is_ok());
+        assert!(
+            LoudnessMeter::with_roles_and_metric_demand(rate, &MONO, NATIVE, INTEGRATED).is_ok()
+        );
         assert!(LoudnessMeter::with_roles_high_fidelity(rate, &MONO).is_ok());
     }
     for rate in [16, 3_000, 3_363, 3_364, UPPER] {
-        assert!(LoudnessMeter::libebur128_126_default_layout(rate, 1).is_ok(), "compatibility rate {rate}");
+        assert!(
+            LoudnessMeter::libebur128_126_default_layout(rate, 1).is_ok(),
+            "compatibility rate {rate}"
+        );
         assert!(LoudnessMeter::with_roles(rate, &MONO, COMPAT).is_ok());
     }
     assert_unsupported(LoudnessMeter::new(UPPER + 1, 1), UPPER + 1);
     assert_unsupported(LoudnessMeter::libebur128_126_default_layout(15, 1), 15);
-    assert_unsupported(LoudnessMeter::libebur128_126_default_layout(UPPER + 1, 1), UPPER + 1);
-    assert!(matches!(LoudnessMeter::new(0, 1), Err(LoudnessError::InvalidSampleRate)));
-    assert!(matches!(LoudnessMeter::with_roles_high_fidelity(0, &MONO), Err(LoudnessError::InvalidSampleRate)));
+    assert_unsupported(
+        LoudnessMeter::libebur128_126_default_layout(UPPER + 1, 1),
+        UPPER + 1,
+    );
+    assert!(matches!(
+        LoudnessMeter::new(0, 1),
+        Err(LoudnessError::InvalidSampleRate)
+    ));
+    assert!(matches!(
+        LoudnessMeter::with_roles_high_fidelity(0, &MONO),
+        Err(LoudnessError::InvalidSampleRate)
+    ));
     for rate in [3_364, 7_999, UPPER + 1] {
         assert_unsupported(ShortTermMeter::new(rate, &MONO), rate);
         assert_unsupported(ShortTermMeter::new_high_fidelity(rate, &MONO), rate);

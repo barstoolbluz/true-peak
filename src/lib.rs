@@ -15,19 +15,27 @@ use std::error::Error;
 use std::f64::consts::PI;
 use std::fmt;
 
+pub mod compat;
 pub mod loudness;
 pub mod replaygain;
-pub mod compat;
 
-mod headroom64_coefficients;
-mod hq1024_coefficients;
-mod qualified_prefix_coefficients;
-mod qualified_half_delay_fft;
 mod certified_scan;
-mod raw_screen_metadata;
 mod fast_scan;
 #[cfg(feature = "fast-stage-timing")]
 mod fast_stage_timing;
+// Preserve the generator's full decimal output and frozen reference bank.
+#[allow(clippy::excessive_precision)]
+mod headroom64_coefficients;
+// Generated coefficient file is byte-bound by the offline qualifier.
+#[rustfmt::skip]
+#[allow(clippy::large_const_arrays)]
+mod hq1024_coefficients;
+mod qualified_half_delay_fft;
+// Preserve exact generator bytes, fixed roots and const storage/codegen.
+#[rustfmt::skip]
+#[allow(clippy::large_const_arrays, clippy::approx_constant)]
+mod qualified_prefix_coefficients;
+mod raw_screen_metadata;
 
 use headroom64_coefficients::HEADROOM64_HALF_DELAY_COEFFICIENTS;
 
@@ -256,20 +264,35 @@ pub struct PeakInterval {
 
 impl PeakInterval {
     pub(crate) fn new(lower_linear: f64, upper_linear: f64) -> Self {
-        assert!(lower_linear >= 0.0, "peak interval lower must be nonnegative");
-        assert!(upper_linear >= lower_linear, "peak interval upper must not be below lower");
-        Self { lower_linear, upper_linear }
+        assert!(
+            lower_linear >= 0.0,
+            "peak interval lower must be nonnegative"
+        );
+        assert!(
+            upper_linear >= lower_linear,
+            "peak interval upper must not be below lower"
+        );
+        Self {
+            lower_linear,
+            upper_linear,
+        }
     }
 
     #[must_use]
     pub fn width_db(self) -> Option<f64> {
         let upper_bits = f64_magnitude_bits_for_db(self.upper_linear);
         let lower_bits = f64_magnitude_bits_for_db(self.lower_linear);
-        if upper_bits == 0 { return None; }
-        if lower_bits == 0 { return Some(f64::INFINITY); }
+        if upper_bits == 0 {
+            return None;
+        }
+        if lower_bits == 0 {
+            return Some(f64::INFINITY);
+        }
         if upper_bits < F64_MIN_NORMAL_BITS_FOR_DB || lower_bits < F64_MIN_NORMAL_BITS_FOR_DB {
-            Some(positive_finite_linear_to_dbtp(self.upper_linear)
-                - positive_finite_linear_to_dbtp(self.lower_linear))
+            Some(
+                positive_finite_linear_to_dbtp(self.upper_linear)
+                    - positive_finite_linear_to_dbtp(self.lower_linear),
+            )
         } else {
             Some(20.0 * (self.upper_linear / self.lower_linear).log10())
         }
@@ -411,9 +434,13 @@ pub struct PeakCertificate {
 
 impl PeakCertificate {
     #[must_use]
-    pub fn upper_level(&self) -> PeakLevel { self.finite_interval.upper_level() }
+    pub fn upper_level(&self) -> PeakLevel {
+        self.finite_interval.upper_level()
+    }
     #[must_use]
-    pub fn interval_width_db(&self) -> Option<f64> { self.finite_interval.width_db() }
+    pub fn interval_width_db(&self) -> Option<f64> {
+        self.finite_interval.width_db()
+    }
     #[must_use]
     pub const fn reconstruction_linf_gain_upper(&self) -> f64 {
         self.reconstruction_linf_gain_upper
@@ -483,6 +510,8 @@ pub struct CertifiedPeakMeter {
 }
 
 #[derive(Debug, Clone)]
+// Keep both backends inline; boxing adds a heap allocation and indirection.
+#[allow(clippy::large_enum_variant)]
 enum CertifiedPeakBackend {
     Certified(certified_scan::CertifiedPeakMeterImpl),
     Fast(fast_scan::FastPeakMeterImpl),
@@ -497,27 +526,29 @@ impl CertifiedPeakMeter {
         tier: PeakTier,
     ) -> Result<Self, TruePeakError> {
         let inner = match tier {
-            PeakTier::Reference => CertifiedPeakBackend::Certified(
-                certified_scan::CertifiedPeakMeterImpl::new(
+            PeakTier::Reference => {
+                CertifiedPeakBackend::Certified(certified_scan::CertifiedPeakMeterImpl::new(
                     sample_rate_hz,
                     channels,
                     edge_policy,
                     ReconstructionId::Hq1024V1,
                     SearchPolicy::Reference9,
-                )?,
-            ),
-            PeakTier::Standard => CertifiedPeakBackend::Certified(
-                certified_scan::CertifiedPeakMeterImpl::new(
+                )?)
+            }
+            PeakTier::Standard => {
+                CertifiedPeakBackend::Certified(certified_scan::CertifiedPeakMeterImpl::new(
                     sample_rate_hz,
                     channels,
                     edge_policy,
                     ReconstructionId::Hq1024V1,
                     SearchPolicy::Fast90,
-                )?,
-            ),
-            PeakTier::Fast => CertifiedPeakBackend::Fast(
-                fast_scan::FastPeakMeterImpl::new(sample_rate_hz, channels, edge_policy)?,
-            ),
+                )?)
+            }
+            PeakTier::Fast => CertifiedPeakBackend::Fast(fast_scan::FastPeakMeterImpl::new(
+                sample_rate_hz,
+                channels,
+                edge_policy,
+            )?),
         };
         Ok(Self { inner })
     }
@@ -534,19 +565,21 @@ impl CertifiedPeakMeter {
         mode: FastCommissioningMode,
     ) -> Result<Self, TruePeakError> {
         let execution_mode = match mode {
-            FastCommissioningMode::SurveyBoundsOnly =>
-                fast_scan::FastExecutionMode::SurveyBoundsOnly,
-            FastCommissioningMode::NominationOnly =>
-                fast_scan::FastExecutionMode::NominationOnly,
+            FastCommissioningMode::SurveyBoundsOnly => {
+                fast_scan::FastExecutionMode::SurveyBoundsOnly
+            }
+            FastCommissioningMode::NominationOnly => fast_scan::FastExecutionMode::NominationOnly,
             FastCommissioningMode::Production => fast_scan::FastExecutionMode::Production,
         };
         Ok(Self {
-            inner: CertifiedPeakBackend::Fast(fast_scan::FastPeakMeterImpl::new_with_execution_mode(
-                sample_rate_hz,
-                channels,
-                edge_policy,
-                execution_mode,
-            )?),
+            inner: CertifiedPeakBackend::Fast(
+                fast_scan::FastPeakMeterImpl::new_with_execution_mode(
+                    sample_rate_hz,
+                    channels,
+                    edge_policy,
+                    execution_mode,
+                )?,
+            ),
         })
     }
 
@@ -612,8 +645,13 @@ pub struct TruePeakResult {
 pub enum TruePeakError {
     InvalidSampleRate,
     InvalidChannelCount,
-    IncompleteFrame { samples: usize, channels: usize },
-    NonFiniteSample { sample_index: usize },
+    IncompleteFrame {
+        samples: usize,
+        channels: usize,
+    },
+    NonFiniteSample {
+        sample_index: usize,
+    },
     NumericalOverflow,
     /// Internal Reference invariant failure: a live unresolved upper survived
     /// an exhaustive search. Returning a partial Reference certificate would
@@ -677,15 +715,10 @@ impl InterpolatorStage {
         normalize_phase_dc: bool,
     ) -> Self {
         debug_assert!(taps > 0 && factor > 0);
-        let delay_frames = (taps + factor - 1) / factor;
+        let delay_frames = taps.div_ceil(factor);
         let group_delay_inputs = ((taps - 1) / (2 * factor)) as i128;
-        let filters = build_polyphase_filters(
-            taps,
-            factor,
-            delay_frames,
-            window,
-            normalize_phase_dc,
-        );
+        let filters =
+            build_polyphase_filters(taps, factor, delay_frames, window, normalize_phase_dc);
         Self {
             factor,
             group_delay_inputs,
@@ -746,9 +779,8 @@ impl ReportingEngine {
         } else {
             4
         };
-        let stage = (factor > 1).then(|| {
-            InterpolatorStage::new(REPORTING_TAPS, factor, channels, Window::Hann, false)
-        });
+        let stage = (factor > 1)
+            .then(|| InterpolatorStage::new(REPORTING_TAPS, factor, channels, Window::Hann, false));
         Self {
             factor,
             stage,
@@ -799,8 +831,12 @@ pub struct ReportingPeakMeter {
 
 impl ReportingPeakMeter {
     pub fn new(sample_rate_hz: u32, channels: usize) -> Result<Self, TruePeakError> {
-        if sample_rate_hz == 0 { return Err(TruePeakError::InvalidSampleRate); }
-        if channels == 0 { return Err(TruePeakError::InvalidChannelCount); }
+        if sample_rate_hz == 0 {
+            return Err(TruePeakError::InvalidSampleRate);
+        }
+        if channels == 0 {
+            return Err(TruePeakError::InvalidChannelCount);
+        }
         Ok(Self {
             sample_rate_hz,
             channels,
@@ -814,37 +850,65 @@ impl ReportingPeakMeter {
     /// Effective interpolation factor for the libebur128-compatible profile.
     #[must_use]
     pub const fn oversample_factor(&self) -> usize {
-        if self.sample_rate_hz >= 192_000 { 1 }
-        else if self.sample_rate_hz >= 96_000 { 2 }
-        else { 4 }
+        if self.sample_rate_hz >= 192_000 {
+            1
+        } else if self.sample_rate_hz >= 96_000 {
+            2
+        } else {
+            4
+        }
     }
 
     /// Validate the whole block before mutation, then consume complete frames.
     pub fn push_interleaved(&mut self, samples: &[f64]) -> Result<(), TruePeakError> {
-        if samples.len() % self.channels != 0 {
-            return Err(TruePeakError::IncompleteFrame { samples: samples.len(), channels: self.channels });
+        if !samples.len().is_multiple_of(self.channels) {
+            return Err(TruePeakError::IncompleteFrame {
+                samples: samples.len(),
+                channels: self.channels,
+            });
         }
-        if let Some((sample_index, _)) = samples.iter().enumerate().find(|(_, sample)| !sample.is_finite()) {
+        if let Some((sample_index, _)) = samples
+            .iter()
+            .enumerate()
+            .find(|(_, sample)| !sample.is_finite())
+        {
             return Err(TruePeakError::NonFiniteSample { sample_index });
         }
         for frame in samples.chunks_exact(self.channels) {
             update_channel_peaks(&mut self.channel_peaks, frame);
-            self.engine.process_frame(frame, self.next_input_index, &mut self.channel_peaks, None);
+            self.engine
+                .process_frame(frame, self.next_input_index, &mut self.channel_peaks, None);
             self.next_input_index += 1;
-            self.frames = self.frames.checked_add(1).ok_or(TruePeakError::InputTooLong)?;
+            self.frames = self
+                .frames
+                .checked_add(1)
+                .ok_or(TruePeakError::InputTooLong)?;
         }
         Ok(())
     }
 
     pub fn finalize(self) -> Result<TruePeakResult, TruePeakError> {
-        if self.frames == 0 { return Err(TruePeakError::EmptyInput); }
-        let linear = self.channel_peaks.iter().copied().fold(0.0, max_nonnegative_by_bits);
+        if self.frames == 0 {
+            return Err(TruePeakError::EmptyInput);
+        }
+        let linear = self
+            .channel_peaks
+            .iter()
+            .copied()
+            .fold(0.0, max_nonnegative_by_bits);
         let overall = if f64_magnitude_bits_for_db(linear) == 0 {
             PeakLevel::Silence
         } else {
-            PeakLevel::Finite { linear, dbtp: positive_finite_linear_to_dbtp(linear) }
+            PeakLevel::Finite {
+                linear,
+                dbtp: positive_finite_linear_to_dbtp(linear),
+            }
         };
-        Ok(TruePeakResult { overall, channel_linear_peaks: self.channel_peaks, frames: self.frames })
+        Ok(TruePeakResult {
+            overall,
+            channel_linear_peaks: self.channel_peaks,
+            frames: self.frames,
+        })
     }
 }
 
@@ -892,8 +956,8 @@ impl HeadroomHalfSampleStage {
 
             // Preserve the original summation order exactly. For coefficient
             // i, recent[i] is delayed(i) and old[i] is delayed(383-i).
-            let recent = &delay[base + HEADROOM64_HALF_DELAY_TAPS / 2 + 1
-                ..base + HEADROOM64_HALF_DELAY_TAPS + 1];
+            let recent = &delay
+                [base + HEADROOM64_HALF_DELAY_TAPS / 2 + 1..base + HEADROOM64_HALF_DELAY_TAPS + 1];
             let old = &delay[base + 1..base + HEADROOM64_HALF_DELAY_TAPS / 2 + 1];
             let mut half = 0.0;
             for ((recent_sample, old_sample), coefficient) in recent
@@ -936,7 +1000,7 @@ struct HeadroomTwoXStage {
 #[cfg(test)]
 impl HeadroomTwoXStage {
     fn new(taps: usize, channels: usize) -> Self {
-        let delay_frames = (taps + 1) / 2;
+        let delay_frames = taps.div_ceil(2);
         let filters = build_polyphase_filters(taps, 2, delay_frames, Window::Blackman, true);
         debug_assert_eq!(filters.len(), 2);
         debug_assert_eq!(filters[0].indices.len(), 1);
@@ -1073,22 +1137,43 @@ impl HeadroomEngine {
         mut reconstruction_peaks: Option<&mut [f64]>,
         upper_subframe: Option<i128>,
     ) {
-        let base1 = self.stage1.process_frame(frame, input_index, &mut self.scratch1);
+        let base1 = self
+            .stage1
+            .process_frame(frame, input_index, &mut self.scratch1);
         for phase1 in 0..2 {
             let frame1 = &self.scratch1[phase1 * self.channels..(phase1 + 1) * self.channels];
-            let base2 = self.stage2.process_frame(frame1, base1 + phase1 as i128, &mut self.scratch2);
+            let base2 =
+                self.stage2
+                    .process_frame(frame1, base1 + phase1 as i128, &mut self.scratch2);
             for phase2 in 0..2 {
                 let frame2 = &self.scratch2[phase2 * self.channels..(phase2 + 1) * self.channels];
-                let base3 = self.stage3.process_frame(frame2, base2 + phase2 as i128, &mut self.scratch3);
+                let base3 =
+                    self.stage3
+                        .process_frame(frame2, base2 + phase2 as i128, &mut self.scratch3);
                 for phase3 in 0..2 {
-                    let frame3 = &self.scratch3[phase3 * self.channels..(phase3 + 1) * self.channels];
-                    let base4 = self.stage4.process_frame(frame3, base3 + phase3 as i128, &mut self.scratch4);
+                    let frame3 =
+                        &self.scratch3[phase3 * self.channels..(phase3 + 1) * self.channels];
+                    let base4 = self.stage4.process_frame(
+                        frame3,
+                        base3 + phase3 as i128,
+                        &mut self.scratch4,
+                    );
                     for phase4 in 0..2 {
-                        let frame4 = &self.scratch4[phase4 * self.channels..(phase4 + 1) * self.channels];
-                        let base5 = self.stage5.process_frame(frame4, base4 + phase4 as i128, &mut self.scratch5);
+                        let frame4 =
+                            &self.scratch4[phase4 * self.channels..(phase4 + 1) * self.channels];
+                        let base5 = self.stage5.process_frame(
+                            frame4,
+                            base4 + phase4 as i128,
+                            &mut self.scratch5,
+                        );
                         for phase5 in 0..2 {
-                            let frame5 = &self.scratch5[phase5 * self.channels..(phase5 + 1) * self.channels];
-                            let base6 = self.stage6.process_frame(frame5, base5 + phase5 as i128, &mut self.scratch6);
+                            let frame5 = &self.scratch5
+                                [phase5 * self.channels..(phase5 + 1) * self.channels];
+                            let base6 = self.stage6.process_frame(
+                                frame5,
+                                base5 + phase5 as i128,
+                                &mut self.scratch6,
+                            );
                             for phase6 in 0..2 {
                                 let output_index = base6 + phase6 as i128;
                                 if output_index < 0
@@ -1129,15 +1214,26 @@ pub(crate) fn legacy_headroom64_direct_oracle_peak(
     channels: usize,
     edge_policy: EdgePolicy,
 ) -> Result<f64, TruePeakError> {
-    if channels == 0 { return Err(TruePeakError::InvalidChannelCount); }
-    if samples.len() % channels != 0 {
-        return Err(TruePeakError::IncompleteFrame { samples: samples.len(), channels });
+    if channels == 0 {
+        return Err(TruePeakError::InvalidChannelCount);
     }
-    if let Some((sample_index, _)) = samples.iter().enumerate().find(|(_, sample)| !sample.is_finite()) {
+    if !samples.len().is_multiple_of(channels) {
+        return Err(TruePeakError::IncompleteFrame {
+            samples: samples.len(),
+            channels,
+        });
+    }
+    if let Some((sample_index, _)) = samples
+        .iter()
+        .enumerate()
+        .find(|(_, sample)| !sample.is_finite())
+    {
         return Err(TruePeakError::NonFiniteSample { sample_index });
     }
     let frames = samples.len() / channels;
-    if frames == 0 { return Err(TruePeakError::EmptyInput); }
+    if frames == 0 {
+        return Err(TruePeakError::EmptyInput);
+    }
 
     let mut engine = HeadroomEngine::new(channels);
     let mut point_sink = vec![0.0; channels];
@@ -1184,7 +1280,9 @@ pub(crate) fn legacy_headroom64_direct_oracle_peak(
         );
     }
 
-    Ok(reconstruction_peaks.into_iter().fold(0.0, max_nonnegative_by_bits))
+    Ok(reconstruction_peaks
+        .into_iter()
+        .fold(0.0, max_nonnegative_by_bits))
 }
 
 #[inline]
@@ -1275,16 +1373,37 @@ mod public_surface_tests {
     fn tier_surface_is_exactly_hq_reference_standard_fast() {
         let tiers = [PeakTier::Reference, PeakTier::Standard, PeakTier::Fast];
         assert_eq!(tiers.len(), 3);
-        assert_eq!(PeakTier::Reference.interval_objective_db(), Some(REFERENCE_INTERVAL_OBJECTIVE_DB));
-        assert_eq!(PeakTier::Standard.interval_objective_db(), Some(STANDARD_INTERVAL_OBJECTIVE_DB));
+        assert_eq!(
+            PeakTier::Reference.interval_objective_db(),
+            Some(REFERENCE_INTERVAL_OBJECTIVE_DB)
+        );
+        assert_eq!(
+            PeakTier::Standard.interval_objective_db(),
+            Some(STANDARD_INTERVAL_OBJECTIVE_DB)
+        );
         assert_eq!(PeakTier::Fast.interval_objective_db(), None);
     }
 
     #[test]
     fn reporting_profile_factor_is_rate_dependent_and_separate() {
-        assert_eq!(ReportingPeakMeter::new(48_000, 1).unwrap().oversample_factor(), 4);
-        assert_eq!(ReportingPeakMeter::new(96_000, 1).unwrap().oversample_factor(), 2);
-        assert_eq!(ReportingPeakMeter::new(192_000, 1).unwrap().oversample_factor(), 1);
+        assert_eq!(
+            ReportingPeakMeter::new(48_000, 1)
+                .unwrap()
+                .oversample_factor(),
+            4
+        );
+        assert_eq!(
+            ReportingPeakMeter::new(96_000, 1)
+                .unwrap()
+                .oversample_factor(),
+            2
+        );
+        assert_eq!(
+            ReportingPeakMeter::new(192_000, 1)
+                .unwrap()
+                .oversample_factor(),
+            1
+        );
     }
 
     #[test]
